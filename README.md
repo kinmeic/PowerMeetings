@@ -23,7 +23,7 @@ A native macOS app that captures, transcribes, and translates your meetings in r
 ## Build & Run
 
 ```bash
-git clone https://github.com/<your-username>/PowerMeetings.git
+git clone https://github.com/kinmeic/PowerMeetings.git
 cd PowerMeetings
 swift build
 swift run PowerMeetings

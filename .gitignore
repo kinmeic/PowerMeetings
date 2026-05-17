@@ -1,0 +1,35 @@
+# Build artifacts
+.build/
+.swiftpm/
+dist/
+DerivedData/
+
+# Xcode user data
+*.xcuserdata/
+*.xcuserstate
+xcuserdata/
+
+# macOS junk
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# App runtime data (contains user meetings, recordings, keys)
+~/Library/Application Support/PowerMeetings/
+
+# Sensitive / config files
+*.env
+.env.*
+*.secret
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# IDE
+.vscode/
+.idea/
+
+# Package manager lock
+Package.resolved

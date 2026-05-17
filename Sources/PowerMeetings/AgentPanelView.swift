@@ -14,6 +14,8 @@ struct AgentPanelView: View {
     @State private var healthStatus = ChatAgentHealthStatus.checking
     @State private var activityText = ""
     @State private var activeTools: [String] = []
+    @State private var composerHeight: CGFloat = 22
+    @State private var toastText: String?
 
     var body: some View {
         VStack(spacing: 16) {
@@ -23,6 +25,18 @@ struct AgentPanelView: View {
         }
         .padding(22)
         .background(AppTheme.background)
+        .overlay(alignment: .bottom) {
+            if let toastText {
+                Text(toastText)
+                    .font(.caption.bold())
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(AppTheme.ink.opacity(0.88), in: Capsule())
+                    .foregroundStyle(.white)
+                    .padding(.bottom, 86)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
         .onAppear {
             startHealthChecks()
         }
@@ -89,13 +103,14 @@ struct AgentPanelView: View {
         HStack(alignment: .bottom, spacing: 10) {
             AgentComposerTextView(
                 text: $draft,
+                measuredHeight: $composerHeight,
                 placeholder: "Ask about this meeting...",
                 onSend: {
                     guard isStreaming == false else { return }
                     send()
                 }
             )
-            .frame(minHeight: 38, maxHeight: 96)
+            .frame(height: composerHeight)
             .padding(12)
             .background(.white.opacity(0.74), in: RoundedRectangle(cornerRadius: 16))
 
@@ -308,6 +323,15 @@ struct AgentPanelView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(content, forType: .string)
         #endif
+        withAnimation(.easeOut(duration: 0.16)) {
+            toastText = "Copied"
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.2))
+            withAnimation(.easeIn(duration: 0.16)) {
+                toastText = nil
+            }
+        }
     }
 }
 
@@ -366,8 +390,12 @@ private struct AgentHealthPill: View {
 #if os(macOS)
 private struct AgentComposerTextView: NSViewRepresentable {
     @Binding var text: String
+    @Binding var measuredHeight: CGFloat
     let placeholder: String
     let onSend: () -> Void
+
+    private let minHeight: CGFloat = 22
+    private let maxHeight: CGFloat = 22 * 6
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
@@ -389,26 +417,39 @@ private struct AgentComposerTextView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? NSTextView,
-              textView.string != text else { return }
+              textView.string != text else {
+            context.coordinator.updateHeight(nsView)
+            return
+        }
         textView.string = text
+        context.coordinator.updateHeight(nsView)
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onSend: onSend)
+        Coordinator(text: $text, measuredHeight: $measuredHeight, minHeight: minHeight, maxHeight: maxHeight, onSend: onSend)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         @Binding var text: String
+        @Binding var measuredHeight: CGFloat
+        let minHeight: CGFloat
+        let maxHeight: CGFloat
         let onSend: () -> Void
 
-        init(text: Binding<String>, onSend: @escaping () -> Void) {
+        init(text: Binding<String>, measuredHeight: Binding<CGFloat>, minHeight: CGFloat, maxHeight: CGFloat, onSend: @escaping () -> Void) {
             _text = text
+            _measuredHeight = measuredHeight
+            self.minHeight = minHeight
+            self.maxHeight = maxHeight
             self.onSend = onSend
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             text = textView.string
+            if let scrollView = textView.enclosingScrollView {
+                updateHeight(scrollView)
+            }
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -422,11 +463,25 @@ private struct AgentComposerTextView: NSViewRepresentable {
             onSend()
             return true
         }
+
+        @MainActor
+        func updateHeight(_ scrollView: NSScrollView) {
+            guard let textView = scrollView.documentView as? NSTextView,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            layoutManager.ensureLayout(for: textContainer)
+            let usedRect = layoutManager.usedRect(for: textContainer)
+            let nextHeight = min(maxHeight, max(minHeight, ceil(usedRect.height + 2)))
+            if abs(measuredHeight - nextHeight) > 1 {
+                measuredHeight = nextHeight
+            }
+        }
     }
 }
 #else
 private struct AgentComposerTextView: View {
     @Binding var text: String
+    @Binding var measuredHeight: CGFloat
     let placeholder: String
     let onSend: () -> Void
 
@@ -514,7 +569,7 @@ private struct AgentBubbleView: View {
     }
 }
 
-private struct MarkdownText: View {
+struct MarkdownText: View {
     let content: String
     let isUserBubble: Bool
 

@@ -968,6 +968,7 @@ struct MeetingAIClient {
         let prompt = """
         Generate concise meeting minutes in Markdown.
         Output language: \(localLanguage.translationTarget).
+        Return raw Markdown only. Do not wrap the result in triple backticks or a code block.
 
         Meeting: \(meeting.title)
         Time: \(meeting.scheduledAt.formatted(date: .complete, time: .shortened))
@@ -986,7 +987,7 @@ struct MeetingAIClient {
         let request = ChatCompletionRequest(
             model: summaryModel,
             messages: [
-                .init(role: "system", content: "You are a precise meeting minutes assistant. Always write the final minutes in \(localLanguage.translationTarget)."),
+                .init(role: "system", content: "You are a precise meeting minutes assistant. Always write the final minutes in \(localLanguage.translationTarget). Return raw Markdown only, never fenced code blocks."),
                 .init(role: "user", content: prompt)
             ],
             temperature: 0.2

@@ -1,3 +1,4 @@
+import MarkdownUI
 import SwiftUI
 #if os(macOS)
 import AppKit
@@ -541,7 +542,7 @@ private struct SummaryView: View {
     @State private var generationError: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Meeting Summary")
                     .font(.title2.bold())
@@ -557,10 +558,6 @@ private struct SummaryView: View {
                 .help(canGenerateSummary ? "Generate and save meeting summary" : "Configure API Key and Summary Model in Settings first.")
             }
 
-            Text(meeting.summary)
-                .foregroundStyle(AppTheme.muted)
-                .textSelection(.enabled)
-
             if let generationError {
                 Text(generationError)
                     .font(.caption)
@@ -568,13 +565,109 @@ private struct SummaryView: View {
                     .textSelection(.enabled)
             }
 
-            Label("Action items and decisions will be generated from transcript context.", systemImage: "sparkles")
-                .foregroundStyle(AppTheme.moss)
-            Spacer()
+            ScrollView {
+                Markdown(normalizedMarkdownSummary)
+                    .markdownTheme(summaryMarkdownTheme)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 2)
+            }
+            .scrollIndicators(.visible)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .glassCard()
+    }
+
+    private var summaryMarkdownTheme: Theme {
+        Theme.gitHub
+            .text {
+                ForegroundColor(.primary)
+                FontSize(15)
+            }
+            .heading1 { configuration in
+                configuration.label
+                    .markdownTextStyle {
+                        FontWeight(.bold)
+                        FontSize(26)
+                    }
+                    .markdownMargin(top: 0, bottom: 14)
+            }
+            .heading2 { configuration in
+                configuration.label
+                    .markdownTextStyle {
+                        FontWeight(.semibold)
+                        FontSize(20)
+                    }
+                    .markdownMargin(top: 18, bottom: 8)
+            }
+            .code {
+                FontFamilyVariant(.monospaced)
+                FontSize(.em(0.9))
+            }
+            .codeBlock { configuration in
+                ScrollView(.horizontal) {
+                    configuration.label
+                        .fixedSize(horizontal: false, vertical: true)
+                        .markdownTextStyle {
+                            FontFamilyVariant(.monospaced)
+                            FontSize(.em(0.9))
+                        }
+                        .padding(12)
+                }
+                .background(Color.black.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .markdownMargin(top: 0, bottom: 14)
+            }
+    }
+
+    private var normalizedMarkdownSummary: String {
+        normalizeMarkdown(meeting.summary)
+    }
+
+    private func normalizeMarkdown(_ markdown: String) -> String {
+        var trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        trimmed = stripMarkdownFence(trimmed)
+        let lines = trimmed.components(separatedBy: .newlines)
+        let nonEmptyLines = lines.filter {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+
+        let commonIndent = nonEmptyLines
+            .map { line in
+                line.prefix { $0 == " " || $0 == "\t" }.count
+            }
+            .min() ?? 0
+
+        guard commonIndent > 0 else { return trimmed }
+
+        return lines
+            .map { line in
+                guard line.count >= commonIndent else { return line.trimmingCharacters(in: .whitespaces) }
+                let start = line.index(line.startIndex, offsetBy: commonIndent)
+                return String(line[start...])
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func stripMarkdownFence(_ markdown: String) -> String {
+        let lines = markdown.components(separatedBy: .newlines)
+        guard lines.count >= 2,
+              let first = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              first.hasPrefix("```") || first.hasPrefix("~~~") else {
+            return markdown
+        }
+
+        let fencePrefix = String(first.prefix(3))
+        guard let last = lines.last?.trimmingCharacters(in: .whitespacesAndNewlines),
+              last.hasPrefix(fencePrefix) else {
+            return markdown
+        }
+
+        return lines.dropFirst().dropLast().joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var canGenerateSummary: Bool {
@@ -601,7 +694,7 @@ private struct SummaryView: View {
 
             await MainActor.run {
                 isGenerating = false
-                let trimmedSummary = summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let trimmedSummary = normalizeMarkdown(summary ?? "")
                 if trimmedSummary.isEmpty {
                     generationError = "Summary generation failed. Please check the Summary Model, API Base URL, and API Key."
                     return

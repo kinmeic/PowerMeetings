@@ -9,19 +9,26 @@ struct MainView: View {
     @State private var isShowingSettings = false
 
     var body: some View {
-        NavigationSplitView {
-            MeetingListView()
-                .navigationSplitViewColumnWidth(min: 260, ideal: 300)
-        } content: {
-            MeetingWorkspaceView()
-                .navigationSplitViewColumnWidth(min: 520, ideal: 650)
-        } detail: {
+        Group {
             if modelSettings.chatAgentEnabled {
-                AgentPanelView()
-                    .navigationSplitViewColumnWidth(min: 340, ideal: 400)
+                NavigationSplitView {
+                    MeetingListView()
+                        .navigationSplitViewColumnWidth(min: 260, ideal: 300)
+                } content: {
+                    MeetingWorkspaceView()
+                        .navigationSplitViewColumnWidth(min: 520, ideal: 650)
+                } detail: {
+                    AgentPanelView()
+                        .navigationSplitViewColumnWidth(min: 340, ideal: 400)
+                }
             } else {
-                EmptyView()
-                    .navigationSplitViewColumnWidth(min: 0, ideal: 0)
+                NavigationSplitView {
+                    MeetingListView()
+                        .navigationSplitViewColumnWidth(min: 260, ideal: 300)
+                } detail: {
+                    MeetingWorkspaceView()
+                        .navigationSplitViewColumnWidth(min: 720, ideal: 900)
+                }
             }
         }
         .background(AppTheme.background)

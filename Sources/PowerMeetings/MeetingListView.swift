@@ -55,7 +55,6 @@ struct MeetingListView: View {
             }
         }
         .padding(22)
-        .background(AppTheme.background)
     }
 
     private var searchField: some View {

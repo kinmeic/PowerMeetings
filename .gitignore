@@ -31,5 +31,8 @@ secrets.json
 .vscode/
 .idea/
 
+# Agent worktree scratch space
+.claude/worktrees/
+
 # Package manager lock
 Package.resolved

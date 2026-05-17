@@ -12,6 +12,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioDeviceManager: AudioDeviceManager
     @EnvironmentObject private var modelSettings: ModelSettingsStore
+    @StateObject private var audioLevelMonitor = SettingsAudioLevelMonitor()
 
     @State private var selectedTab = SettingsTab.audio
     @State private var selectedAudioDeviceID: String?
@@ -59,6 +60,13 @@ struct SettingsView: View {
         .onAppear {
             audioDeviceManager.refreshDevices()
             loadDraftValues()
+            audioLevelMonitor.start(deviceID: selectedAudioDeviceID)
+        }
+        .onDisappear {
+            audioLevelMonitor.stop()
+        }
+        .onChange(of: selectedAudioDeviceID) { _, deviceID in
+            audioLevelMonitor.start(deviceID: deviceID)
         }
     }
 
@@ -90,6 +98,13 @@ struct SettingsView: View {
 
                 Button("Refresh Devices") {
                     audioDeviceManager.refreshDevices()
+                }
+
+                HStack(spacing: 14) {
+                    Text("Input Level")
+                    Spacer()
+                    SettingsInputLevelMeter(level: audioLevelMonitor.level)
+                        .frame(width: 230, height: 22)
                 }
             }
 
@@ -268,4 +283,34 @@ struct SettingsView: View {
         formatter.maximum = 65_535
         return formatter
     }()
+}
+
+private struct SettingsInputLevelMeter: View {
+    let level: Double
+    private let barCount = 16
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "mic.fill")
+                .foregroundStyle(AppTheme.muted)
+
+            HStack(spacing: 6) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule()
+                        .fill(index < activeBars ? AppTheme.moss : Color.black.opacity(0.12))
+                        .frame(width: 8, height: 20)
+                        .animation(.easeOut(duration: 0.08), value: activeBars)
+                }
+            }
+
+            Image(systemName: "mic.fill")
+                .foregroundStyle(AppTheme.muted)
+        }
+        .accessibilityLabel("Input level")
+        .accessibilityValue("\(Int(level * 100)) percent")
+    }
+
+    private var activeBars: Int {
+        min(barCount, max(0, Int((level * Double(barCount)).rounded(.up))))
+    }
 }

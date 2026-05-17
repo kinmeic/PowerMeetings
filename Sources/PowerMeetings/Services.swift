@@ -120,6 +120,75 @@ final class AudioDeviceManager: ObservableObject {
 }
 
 @MainActor
+final class SettingsAudioLevelMonitor: NSObject, ObservableObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    @Published private(set) var level: Double = 0
+
+    private let captureQueue = DispatchQueue(label: "PowerMeetings.SettingsAudioLevel")
+    private var captureSession: AVCaptureSession?
+
+    func start(deviceID: String?) {
+        stop()
+
+        let session = AVCaptureSession()
+        session.beginConfiguration()
+
+        guard let device = selectedAudioDevice(id: deviceID),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            level = 0
+            return
+        }
+        session.addInput(input)
+
+        let output = AVCaptureAudioDataOutput()
+        guard session.canAddOutput(output) else {
+            level = 0
+            return
+        }
+        output.setSampleBufferDelegate(self, queue: captureQueue)
+        session.addOutput(output)
+        session.commitConfiguration()
+
+        captureSession = session
+        captureQueue.async { [session] in
+            session.startRunning()
+        }
+    }
+
+    func stop() {
+        let session = captureSession
+        captureSession = nil
+        level = 0
+        captureQueue.async { [session] in
+            session?.stopRunning()
+        }
+    }
+
+    nonisolated func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard let level = AudioCaptureEngine.audioLevel(from: sampleBuffer) else { return }
+        Task { @MainActor in
+            self.level = level
+        }
+    }
+
+    private func selectedAudioDevice(id: String?) -> AVCaptureDevice? {
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        if let id, let selected = session.devices.first(where: { $0.uniqueID == id }) {
+            return selected
+        }
+        return AVCaptureDevice.default(for: .audio) ?? session.devices.first
+    }
+}
+
+@MainActor
 final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     enum State: Equatable {
         case idle
@@ -537,7 +606,7 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
         return seconds.isFinite ? seconds : nil
     }
 
-    nonisolated private static func audioLevel(from sampleBuffer: CMSampleBuffer) -> Double? {
+    nonisolated fileprivate static func audioLevel(from sampleBuffer: CMSampleBuffer) -> Double? {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
             return nil

@@ -95,4 +95,4 @@ Configure the host, port, base path, and auth token in Settings.
 
 ## License
 
-MIT
+BSD 3-Clause

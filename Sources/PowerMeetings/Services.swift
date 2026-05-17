@@ -950,7 +950,8 @@ struct MeetingAIClient {
         configuration: ModelConfiguration
     ) async throws -> String? {
         let apiKey = configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard apiKey.isEmpty == false else { return nil }
+        let summaryModel = configuration.summaryModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard apiKey.isEmpty == false, summaryModel.isEmpty == false else { return nil }
 
         let transcript = segments
             .map { segment in
@@ -983,7 +984,7 @@ struct MeetingAIClient {
         """
 
         let request = ChatCompletionRequest(
-            model: configuration.translationModel,
+            model: summaryModel,
             messages: [
                 .init(role: "system", content: "You are a precise meeting minutes assistant. Always write the final minutes in \(localLanguage.translationTarget)."),
                 .init(role: "user", content: prompt)

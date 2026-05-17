@@ -1,4 +1,8 @@
+import MarkdownUI
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 struct AgentPanelView: View {
     @EnvironmentObject private var meetingStore: MeetingStore
@@ -6,6 +10,8 @@ struct AgentPanelView: View {
     @State private var draft = ""
     @State private var isStreaming = false
     @State private var streamTask: Task<Void, Never>?
+    @State private var healthTask: Task<Void, Never>?
+    @State private var healthStatus = ChatAgentHealthStatus.checking
     @State private var activityText = ""
     @State private var activeTools: [String] = []
 
@@ -17,6 +23,12 @@ struct AgentPanelView: View {
         }
         .padding(22)
         .background(AppTheme.background)
+        .onAppear {
+            startHealthChecks()
+        }
+        .onDisappear {
+            healthTask?.cancel()
+        }
         .onChange(of: meetingStore.selectedMeetingID) { _, _ in
             streamTask?.cancel()
             isStreaming = false
@@ -24,13 +36,19 @@ struct AgentPanelView: View {
             activeTools = []
             draft = ""
         }
+        .onChange(of: modelSettings.chatAgentConfiguration) { _, _ in
+            startHealthChecks()
+        }
     }
 
     private var header: some View {
-        Text("Meeting Agent")
-            .font(.system(.title, design: .serif, weight: .bold))
-            .foregroundStyle(AppTheme.ink)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 10) {
+            Text("Meeting Agent")
+                .font(.system(.title, design: .serif, weight: .bold))
+                .foregroundStyle(AppTheme.ink)
+            Spacer()
+            AgentHealthPill(status: healthStatus)
+        }
     }
 
     private var chatList: some View {
@@ -48,6 +66,9 @@ struct AgentPanelView: View {
                             },
                             onApprovalChoice: { choice in
                                 submitApproval(choice, message: message)
+                            },
+                            onCopy: {
+                                copyToPasteboard(message.content)
                             }
                         )
                             .id(message.id)
@@ -66,16 +87,17 @@ struct AgentPanelView: View {
 
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            TextField("Ask about this meeting...", text: $draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...4)
-                .submitLabel(.send)
-                .onSubmit {
+            AgentComposerTextView(
+                text: $draft,
+                placeholder: "Ask about this meeting...",
+                onSend: {
                     guard isStreaming == false else { return }
                     send()
                 }
-                .padding(12)
-                .background(.white.opacity(0.74), in: RoundedRectangle(cornerRadius: 16))
+            )
+            .frame(minHeight: 38, maxHeight: 96)
+            .padding(12)
+            .background(.white.opacity(0.74), in: RoundedRectangle(cornerRadius: 16))
 
             Button {
                 if isStreaming {
@@ -143,6 +165,21 @@ struct AgentPanelView: View {
                     activityText = ""
                     activeTools = []
                 }
+            }
+        }
+    }
+
+    private func startHealthChecks() {
+        healthTask?.cancel()
+        healthStatus = .checking
+        let configuration = modelSettings.chatAgentConfiguration
+        healthTask = Task {
+            while Task.isCancelled == false {
+                let status = await ChatAgentClient().checkHealth(configuration: configuration)
+                await MainActor.run {
+                    healthStatus = status
+                }
+                try? await Task.sleep(for: .seconds(10))
             }
         }
     }
@@ -265,7 +302,140 @@ struct AgentPanelView: View {
             }
         }
     }
+
+    private func copyToPasteboard(_ content: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(content, forType: .string)
+        #endif
+    }
 }
+
+private struct AgentHealthPill: View {
+    let status: ChatAgentHealthStatus
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+            Text(label)
+                .font(.caption.bold())
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.white.opacity(0.72), in: Capsule())
+        .foregroundStyle(color)
+        .help(help)
+    }
+
+    private var label: String {
+        switch status {
+        case .checking:
+            "Checking"
+        case .online:
+            "Online"
+        case .offline:
+            "Offline"
+        }
+    }
+
+    private var color: Color {
+        switch status {
+        case .checking:
+            AppTheme.amber
+        case .online:
+            AppTheme.moss
+        case .offline:
+            .red
+        }
+    }
+
+    private var help: String {
+        switch status {
+        case .checking:
+            "Checking Chat Agent health."
+        case .online:
+            "Chat Agent health check is passing."
+        case let .offline(reason):
+            "Chat Agent health check failed: \(reason)"
+        }
+    }
+}
+
+#if os(macOS)
+private struct AgentComposerTextView: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let onSend: () -> Void
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = false
+
+        guard let textView = scrollView.documentView as? NSTextView else {
+            return scrollView
+        }
+        textView.delegate = context.coordinator
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.isRichText = false
+        textView.drawsBackground = false
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.string = text
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? NSTextView,
+              textView.string != text else { return }
+        textView.string = text
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onSend: onSend)
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        @Binding var text: String
+        let onSend: () -> Void
+
+        init(text: Binding<String>, onSend: @escaping () -> Void) {
+            _text = text
+            self.onSend = onSend
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            text = textView.string
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+
+            if NSEvent.modifierFlags.contains(.shift) || textView.hasMarkedText() {
+                textView.insertNewlineIgnoringFieldEditor(nil)
+                return true
+            }
+
+            onSend()
+            return true
+        }
+    }
+}
+#else
+private struct AgentComposerTextView: View {
+    @Binding var text: String
+    let placeholder: String
+    let onSend: () -> Void
+
+    var body: some View {
+        TextField(placeholder, text: $text, axis: .vertical)
+            .onSubmit(onSend)
+    }
+}
+#endif
 
 private struct AgentBubbleView: View {
     let message: AgentMessage
@@ -274,39 +444,50 @@ private struct AgentBubbleView: View {
     let isStreaming: Bool
     let onClarifyResponse: (String) -> Void
     let onApprovalChoice: (String) -> Void
+    let onCopy: () -> Void
 
     var body: some View {
         HStack {
             if message.sender == .user { Spacer(minLength: 42) }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text(label)
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                if message.content.isEmpty && isStreaming {
-                    AgentActivityView(status: activityText.isEmpty ? "Thinking" : activityText, tools: activeTools)
-                } else {
-                    MarkdownText(content: message.content)
-                        .font(.callout)
-                        .textSelection(.enabled)
+            VStack(alignment: message.sender == .user ? .trailing : .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(label)
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    if message.content.isEmpty && isStreaming {
+                        AgentActivityView(status: activityText.isEmpty ? "Thinking" : activityText, tools: activeTools)
+                    } else {
+                        MarkdownText(content: message.content, isUserBubble: message.sender == .user)
+                            .textSelection(.enabled)
 
-                    if isStreaming && (activityText.isEmpty == false || activeTools.isEmpty == false) {
-                        AgentActivityView(status: activityText, tools: activeTools)
-                            .padding(.top, 4)
+                        if isStreaming && (activityText.isEmpty == false || activeTools.isEmpty == false) {
+                            AgentActivityView(status: activityText, tools: activeTools)
+                                .padding(.top, 4)
+                        }
+                    }
+
+                    if let clarify = message.clarify {
+                        AgentClarifyCard(clarify: clarify, onSubmit: onClarifyResponse)
+                    }
+
+                    if let approval = message.approval {
+                        AgentApprovalCard(approval: approval, onChoice: onApprovalChoice)
                     }
                 }
+                .padding(13)
+                .background(background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .foregroundStyle(foreground)
 
-                if let clarify = message.clarify {
-                    AgentClarifyCard(clarify: clarify, onSubmit: onClarifyResponse)
+                Button(action: onCopy) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption)
+                        .frame(width: 24, height: 24)
                 }
-
-                if let approval = message.approval {
-                    AgentApprovalCard(approval: approval, onChoice: onApprovalChoice)
-                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(AppTheme.muted)
+                .help("Copy message")
             }
-            .padding(13)
-            .background(background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .foregroundStyle(foreground)
 
             if message.sender != .user { Spacer(minLength: 42) }
         }
@@ -335,13 +516,43 @@ private struct AgentBubbleView: View {
 
 private struct MarkdownText: View {
     let content: String
+    let isUserBubble: Bool
 
-    var body: some View {
-        Text(markdown)
+    private var agentTheme: Theme {
+        Theme.gitHub
+            .text {
+                ForegroundColor(.primary)
+                FontSize(14)
+            }
+            .code {
+                FontFamilyVariant(.monospaced)
+                FontSize(.em(0.85))
+            }
+            .codeBlock { configuration in
+                ScrollView(.horizontal) {
+                    configuration.label
+                        .fixedSize(horizontal: false, vertical: true)
+                        .relativeLineSpacing(.em(0.225))
+                        .markdownTextStyle {
+                            FontFamilyVariant(.monospaced)
+                            FontSize(.em(0.85))
+                        }
+                        .padding(12)
+                }
+                .background(Color.black.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .markdownMargin(top: 0, bottom: 16)
+            }
     }
 
-    private var markdown: AttributedString {
-        (try? AttributedString(markdown: content)) ?? AttributedString(content)
+    var body: some View {
+        if isUserBubble {
+            Text(content)
+                .font(.callout)
+        } else {
+            Markdown(content)
+                .markdownTheme(agentTheme)
+        }
     }
 }
 

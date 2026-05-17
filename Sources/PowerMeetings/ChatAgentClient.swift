@@ -27,6 +27,12 @@ enum ChatAgentError: LocalizedError {
     }
 }
 
+enum ChatAgentHealthStatus: Equatable {
+    case checking
+    case online
+    case offline(String)
+}
+
 struct ChatAgentClient {
     struct HistoryItem: Codable {
         let role: String
@@ -142,6 +148,26 @@ struct ChatAgentClient {
             configuration: configuration
         )
         return result.resolved
+    }
+
+    func checkHealth(configuration: ChatAgentConfiguration) async -> ChatAgentHealthStatus {
+        let endpoint = endpointURL(path: "\(configuration.apiBasePath)/health", configuration: configuration)
+        guard let url = URL(string: endpoint) else {
+            return .offline("Invalid URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse,
+               (200..<300).contains(httpResponse.statusCode) {
+                return .online
+            }
+            return .offline("Unavailable")
+        } catch {
+            return .offline("Offline")
+        }
     }
 
     private func endpointURL(configuration: ChatAgentConfiguration) -> String {

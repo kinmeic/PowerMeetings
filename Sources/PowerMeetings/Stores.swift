@@ -285,7 +285,9 @@ final class ModelSettingsStore: ObservableObject {
     @AppStorage("model.apiKey") var apiKey = ""
     @AppStorage("model.realtimeModel") var realtimeModel = "gpt-4o-realtime-preview"
     @AppStorage("model.translationModel") var translationModel = "gpt-4.1-mini"
+    @AppStorage("model.summaryModel") var summaryModel = "gpt-4.1-mini"
     @AppStorage("model.localLanguage") var localLanguage = LocalMeetingLanguage.mandarinChinese.rawValue
+    @AppStorage("chatAgent.enabled") var chatAgentEnabled = true
     @AppStorage("chatAgent.scheme") var chatAgentScheme = "http"
     @AppStorage("chatAgent.host") var chatAgentHost = "127.0.0.1"
     @AppStorage("chatAgent.port") var chatAgentPort = 8000
@@ -299,12 +301,14 @@ final class ModelSettingsStore: ObservableObject {
             apiKey: apiKey,
             realtimeModel: realtimeModel,
             translationModel: translationModel,
+            summaryModel: summaryModel,
             localLanguage: localLanguage
         )
     }
 
     var chatAgentConfiguration: ChatAgentConfiguration {
         ChatAgentConfiguration(
+            isEnabled: chatAgentEnabled,
             scheme: chatAgentScheme,
             host: chatAgentHost,
             port: chatAgentPort,

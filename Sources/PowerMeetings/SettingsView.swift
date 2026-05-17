@@ -21,7 +21,9 @@ struct SettingsView: View {
     @State private var apiKey = ""
     @State private var realtimeModel = ""
     @State private var translationModel = ""
+    @State private var summaryModel = ""
     @State private var localLanguage = LocalMeetingLanguage.mandarinChinese.rawValue
+    @State private var chatAgentEnabled = true
     @State private var chatAgentScheme = "http"
     @State private var chatAgentHost = ""
     @State private var chatAgentPort = 8000
@@ -104,7 +106,6 @@ struct SettingsView: View {
                     Text("Input Level")
                     Spacer()
                     SettingsInputLevelMeter(level: audioLevelMonitor.level)
-                        .frame(width: 230, height: 22)
                 }
             }
 
@@ -140,6 +141,7 @@ struct SettingsView: View {
                 }
                 TextField("Realtime ASR / Audio Model", text: $realtimeModel)
                 TextField("Translation Model", text: $translationModel)
+                TextField("Summary Model", text: $summaryModel)
                 Text("PowerMeetings listens for Mandarin and English locally. Speech matching the local language is shown as-is; the other language is translated using the configured model.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -151,6 +153,7 @@ struct SettingsView: View {
     private var chatAgentSettings: some View {
         Form {
             Section("WorkAgent Service") {
+                Toggle("Enable Meeting Agent", isOn: $chatAgentEnabled)
                 Picker("Scheme", selection: $chatAgentScheme) {
                     Text("http").tag("http")
                     Text("https").tag("https")
@@ -211,7 +214,9 @@ struct SettingsView: View {
         apiKey = modelSettings.apiKey
         realtimeModel = modelSettings.realtimeModel
         translationModel = modelSettings.translationModel
+        summaryModel = modelSettings.summaryModel
         localLanguage = modelSettings.localLanguage
+        chatAgentEnabled = modelSettings.chatAgentEnabled
         chatAgentScheme = modelSettings.chatAgentScheme
         chatAgentHost = modelSettings.chatAgentHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "127.0.0.1" : modelSettings.chatAgentHost
         chatAgentPort = modelSettings.chatAgentPort
@@ -232,7 +237,9 @@ struct SettingsView: View {
         modelSettings.apiKey = apiKey
         modelSettings.realtimeModel = realtimeModel
         modelSettings.translationModel = translationModel
+        modelSettings.summaryModel = summaryModel
         modelSettings.localLanguage = localLanguage
+        modelSettings.chatAgentEnabled = chatAgentEnabled
         modelSettings.chatAgentScheme = normalizedEndpoint.scheme
         modelSettings.chatAgentHost = normalizedEndpoint.host
         modelSettings.chatAgentPort = normalizedEndpoint.port
@@ -287,30 +294,20 @@ struct SettingsView: View {
 
 private struct SettingsInputLevelMeter: View {
     let level: Double
-    private let barCount = 16
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "mic.fill")
-                .foregroundStyle(AppTheme.muted)
-
-            HStack(spacing: 6) {
-                ForEach(0..<barCount, id: \.self) { index in
-                    Capsule()
-                        .fill(index < activeBars ? AppTheme.moss : Color.black.opacity(0.12))
-                        .frame(width: 8, height: 20)
-                        .animation(.easeOut(duration: 0.08), value: activeBars)
-                }
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.black.opacity(0.12))
+                Capsule()
+                    .fill(LinearGradient(colors: [AppTheme.moss, AppTheme.amber], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: max(8, geo.size.width * level))
             }
-
-            Image(systemName: "mic.fill")
-                .foregroundStyle(AppTheme.muted)
         }
+        .frame(height: 8)
+        .animation(.easeOut(duration: 0.08), value: level)
         .accessibilityLabel("Input level")
         .accessibilityValue("\(Int(level * 100)) percent")
-    }
-
-    private var activeBars: Int {
-        min(barCount, max(0, Int((level * Double(barCount)).rounded(.up))))
     }
 }

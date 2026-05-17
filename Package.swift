@@ -10,9 +10,15 @@ let package = Package(
     products: [
         .executable(name: "PowerMeetings", targets: ["PowerMeetings"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.0")
+    ],
     targets: [
         .executableTarget(
             name: "PowerMeetings",
+            dependencies: [
+                .product(name: "MarkdownUI", package: "swift-markdown-ui")
+            ],
             path: "Sources/PowerMeetings"
         )
     ]

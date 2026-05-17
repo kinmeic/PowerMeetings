@@ -132,10 +132,12 @@ struct ModelConfiguration: Hashable, Codable {
     var apiKey = ""
     var realtimeModel = "gpt-4o-realtime-preview"
     var translationModel = "gpt-4.1-mini"
+    var summaryModel = "gpt-4.1-mini"
     var localLanguage = LocalMeetingLanguage.mandarinChinese.rawValue
 }
 
 struct ChatAgentConfiguration: Hashable, Codable {
+    var isEnabled = true
     var scheme = "http"
     var host = "127.0.0.1"
     var port = 8000

@@ -97,49 +97,14 @@ struct MeetingWorkspaceView: View {
         let duration = audioEngine.elapsed
         selectedTab = "Summary"
         meetingStore.updateMeeting(id: meeting.id) {
-            $0.status = .processing
-            $0.summary = "Generating meeting summary..."
+            $0.status = .completed
+            if $0.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || $0.summary == "No summary yet." {
+                $0.summary = "No summary yet. Click Generate Summary when you are ready."
+            }
             $0.recordingFilePath = recordingPath
             $0.duration = duration
         }
-
         summaryTask?.cancel()
-        summaryTask = Task {
-            let configuration = modelSettings.configuration
-            let participants = meeting.participants
-            let initialSegments = await MainActor.run {
-                meetingStore.segments.filter { $0.meetingID == meeting.id }
-            }
-            let aiSummary = try? await MeetingAIClient().summarizeMeeting(
-                meeting: meeting,
-                participants: participants,
-                segments: initialSegments,
-                configuration: configuration
-            )
-
-            await MainActor.run {
-                let segments = meetingStore.segments.filter { $0.meetingID == meeting.id }
-                let questions = segments.filter { $0.kind == .question }.count
-                let decisions = segments.filter { $0.kind == .decision }.count
-                let actionItems = segments.filter { $0.kind == .actionItem }.count
-                let transcriptPreview = segments.suffix(4).map { "- \($0.speaker): \($0.sourceText)" }.joined(separator: "\n")
-                let summary = """
-                Meeting ended. Summary generated from \(segments.count) transcript segment(s).
-
-                Decisions: \(decisions)
-                Questions: \(questions)
-                Action items: \(actionItems)
-
-                Recent context:
-                \(transcriptPreview.isEmpty ? "No transcript content captured yet." : transcriptPreview)
-                """
-
-                meetingStore.updateMeeting(id: meeting.id) {
-                    $0.status = .completed
-                    $0.summary = aiSummary?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? aiSummary! : summary
-                }
-            }
-        }
     }
 
     private func exportRecording() {
@@ -569,15 +534,40 @@ private struct TranscriptSegmentView: View {
 }
 
 private struct SummaryView: View {
+    @EnvironmentObject private var meetingStore: MeetingStore
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     let meeting: Meeting
+    @State private var isGenerating = false
+    @State private var generationError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Meeting Summary")
-                .font(.title2.bold())
+            HStack {
+                Text("Meeting Summary")
+                    .font(.title2.bold())
+                Spacer()
+                Button {
+                    generateSummary()
+                } label: {
+                    Label(isGenerating ? "Generating..." : "Generate Summary", systemImage: "sparkles")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(AppTheme.moss)
+                .disabled(isGenerating || canGenerateSummary == false)
+                .help(canGenerateSummary ? "Generate and save meeting summary" : "Configure API Key and Summary Model in Settings first.")
+            }
+
             Text(meeting.summary)
                 .foregroundStyle(AppTheme.muted)
                 .textSelection(.enabled)
+
+            if let generationError {
+                Text(generationError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+
             Label("Action items and decisions will be generated from transcript context.", systemImage: "sparkles")
                 .foregroundStyle(AppTheme.moss)
             Spacer()
@@ -585,6 +575,42 @@ private struct SummaryView: View {
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .glassCard()
+    }
+
+    private var canGenerateSummary: Bool {
+        modelSettings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            && modelSettings.summaryModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private func generateSummary() {
+        guard canGenerateSummary else { return }
+        isGenerating = true
+        generationError = nil
+
+        Task {
+            let configuration = modelSettings.configuration
+            let segments = await MainActor.run {
+                meetingStore.segments.filter { $0.meetingID == meeting.id }
+            }
+            let summary = try? await MeetingAIClient().summarizeMeeting(
+                meeting: meeting,
+                participants: meeting.participants,
+                segments: segments,
+                configuration: configuration
+            )
+
+            await MainActor.run {
+                isGenerating = false
+                let trimmedSummary = summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if trimmedSummary.isEmpty {
+                    generationError = "Summary generation failed. Please check the Summary Model, API Base URL, and API Key."
+                    return
+                }
+                meetingStore.updateMeeting(id: meeting.id) {
+                    $0.summary = trimmedSummary
+                }
+            }
+        }
     }
 }
 

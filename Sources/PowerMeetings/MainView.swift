@@ -5,18 +5,24 @@ import AppKit
 
 struct MainView: View {
     @EnvironmentObject private var meetingStore: MeetingStore
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     @State private var isShowingSettings = false
 
     var body: some View {
         NavigationSplitView {
             MeetingListView()
-                .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 360)
+                .navigationSplitViewColumnWidth(min: 260, ideal: 300)
         } content: {
             MeetingWorkspaceView()
-                .navigationSplitViewColumnWidth(min: 520, ideal: 650, max: 820)
+                .navigationSplitViewColumnWidth(min: 520, ideal: 650)
         } detail: {
-            AgentPanelView()
-                .navigationSplitViewColumnWidth(min: 340, ideal: 400, max: 520)
+            if modelSettings.chatAgentEnabled {
+                AgentPanelView()
+                    .navigationSplitViewColumnWidth(min: 340, ideal: 400)
+            } else {
+                EmptyView()
+                    .navigationSplitViewColumnWidth(min: 0, ideal: 0)
+            }
         }
         .background(AppTheme.background)
         .navigationTitle(meetingStore.selectedMeeting?.title ?? "PowerMeetings")

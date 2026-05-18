@@ -13,6 +13,7 @@ struct MeetingWorkspaceView: View {
     @StateObject private var session = MeetingSessionViewModel()
     @State private var selectedTab = "Live"
     @State private var summaryTask: Task<Void, Never>?
+    @State private var isTranscribingRecording = false
 
     var body: some View {
         VStack(spacing: 18) {
@@ -43,8 +44,11 @@ struct MeetingWorkspaceView: View {
 
                 if selectedTab == "Live" {
                     TranscriptTimelineView(
+                        meeting: meeting,
                         segments: meetingStore.selectedMeetingSegments,
-                        modelConfiguration: modelSettings.configuration
+                        modelConfiguration: modelSettings.configuration,
+                        isTranscribingRecording: isTranscribingRecording,
+                        onTranscribeRecording: { transcribeRecording(meeting: meeting) }
                     )
                 } else if selectedTab == "Summary" {
                     SummaryView(meeting: meeting)
@@ -143,6 +147,51 @@ struct MeetingWorkspaceView: View {
             return audioEngine.elapsed
         }
         return meeting.duration ?? 0
+    }
+
+    private func transcribeRecording(meeting: Meeting) {
+        guard isTranscribingRecording == false,
+              let path = meeting.recordingFilePath,
+              FileManager.default.fileExists(atPath: path) else { return }
+
+        isTranscribingRecording = true
+        Task {
+            do {
+                let text = try await PostMeetingTranscriber().transcribe(
+                    url: URL(fileURLWithPath: path),
+                    languageID: modelSettings.localLanguage
+                )
+                await MainActor.run {
+                    meetingStore.appendSegment(
+                        TranscriptSegment(
+                            meetingID: meeting.id,
+                            timestamp: 0,
+                            speaker: "Recording",
+                            sourceText: text,
+                            translatedText: text,
+                            kind: .transcript,
+                            confidence: 0.8
+                        )
+                    )
+                    isTranscribingRecording = false
+                }
+            } catch {
+                await MainActor.run {
+                    meetingStore.appendSegment(
+                        TranscriptSegment(
+                            meetingID: meeting.id,
+                            timestamp: 0,
+                            speaker: "System",
+                            sourceText: "Recording transcription failed: \(error.localizedDescription)",
+                            translatedText: "Recording transcription failed: \(error.localizedDescription)",
+                            kind: .transcript,
+                            confidence: 1
+                        )
+                    )
+                    isTranscribingRecording = false
+                }
+            }
+        }
     }
 }
 
@@ -420,8 +469,11 @@ private struct LevelMeter: View {
 }
 
 private struct TranscriptTimelineView: View {
+    let meeting: Meeting
     let segments: [TranscriptSegment]
     let modelConfiguration: ModelConfiguration
+    let isTranscribingRecording: Bool
+    let onTranscribeRecording: () -> Void
 
     private var isModelConfigured: Bool {
         modelConfiguration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -431,6 +483,20 @@ private struct TranscriptTimelineView: View {
 
     var body: some View {
         VStack(spacing: 12) {
+            if meeting.status == .completed, meeting.recordingFilePath?.isEmpty == false {
+                HStack {
+                    Button {
+                        onTranscribeRecording()
+                    } label: {
+                        Label(isTranscribingRecording ? "Transcribing..." : "Transcribe Recording", systemImage: "text.bubble")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppTheme.moss)
+                    .disabled(isTranscribingRecording)
+                    Spacer()
+                }
+            }
+
             if isModelConfigured == false {
                 ProviderStatusBanner(
                     translationModel: modelConfiguration.translationModel

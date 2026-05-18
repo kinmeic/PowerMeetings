@@ -70,6 +70,64 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
     }
 }
 
+struct PostMeetingTranscriber {
+    enum TranscriptionError: LocalizedError {
+        case speechNotAuthorized
+        case recognizerUnavailable
+        case emptyResult
+
+        var errorDescription: String? {
+            switch self {
+            case .speechNotAuthorized:
+                "Speech Recognition is not authorized."
+            case .recognizerUnavailable:
+                "Speech recognizer is unavailable for the selected local language."
+            case .emptyResult:
+                "No speech text was recognized from the recording."
+            }
+        }
+    }
+
+    func transcribe(url: URL, languageID: String) async throws -> String {
+        guard SpeechAuthorizationBridge.currentStatus == .authorized else {
+            throw TranscriptionError.speechNotAuthorized
+        }
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: languageID)) else {
+            throw TranscriptionError.recognizerUnavailable
+        }
+
+        let request = SFSpeechURLRecognitionRequest(url: url)
+        request.shouldReportPartialResults = false
+        if #available(macOS 13.0, *) {
+            request.requiresOnDeviceRecognition = true
+        }
+
+        let text: String = try await withCheckedThrowingContinuation { continuation in
+            var didResume = false
+            recognizer.recognitionTask(with: request) { result, error in
+                if didResume { return }
+                if let error {
+                    didResume = true
+                    continuation.resume(throwing: error)
+                    return
+                }
+                if let result, result.isFinal {
+                    let transcript = result.bestTranscription.formattedString
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    didResume = true
+                    if transcript.isEmpty {
+                        continuation.resume(throwing: TranscriptionError.emptyResult)
+                    } else {
+                        continuation.resume(returning: transcript)
+                    }
+                }
+            }
+        }
+
+        return text
+    }
+}
+
 private final class AudioFileWriter: @unchecked Sendable {
     private let file: AVAudioFile
 

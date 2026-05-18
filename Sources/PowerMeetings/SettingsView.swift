@@ -1,4 +1,5 @@
 import SwiftUI
+import Speech
 
 struct SettingsView: View {
     private enum SettingsTab: String, CaseIterable, Identifiable {
@@ -19,10 +20,12 @@ struct SettingsView: View {
     @State private var provider = ModelProvider.openAI.rawValue
     @State private var apiBaseURL = ""
     @State private var apiKey = ""
-    @State private var realtimeModel = ""
     @State private var translationModel = ""
     @State private var summaryModel = ""
     @State private var localLanguage = LocalMeetingLanguage.mandarinChinese.rawValue
+    @State private var speechAuthorizationStatus = SpeechAuthorizationBridge.currentStatus
+    @State private var speechAuthorizationMessage = ""
+    @State private var isRequestingSpeechAuthorization = false
     @State private var chatAgentEnabled = true
     @State private var chatAgentScheme = "http"
     @State private var chatAgentHost = ""
@@ -62,6 +65,7 @@ struct SettingsView: View {
         .onAppear {
             audioDeviceManager.refreshDevices()
             loadDraftValues()
+            speechAuthorizationStatus = SpeechAuthorizationBridge.currentStatus
             audioLevelMonitor.start(deviceID: selectedAudioDeviceID)
         }
         .onDisappear {
@@ -102,6 +106,32 @@ struct SettingsView: View {
                     audioDeviceManager.refreshDevices()
                 }
 
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("macOS Speech")
+                        Spacer()
+                        Text(speechAuthorizationLabel)
+                            .font(.caption.bold())
+                            .foregroundStyle(speechAuthorizationColor)
+                        Button(speechAuthorizationButtonTitle) {
+                            Task {
+                                await requestSpeechAuthorization()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(speechAuthorizationStatus == .authorized || isRequestingSpeechAuthorization)
+                        Button("Refresh") {
+                            refreshSpeechAuthorizationStatus()
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    if speechAuthorizationMessage.isEmpty == false {
+                        Text(speechAuthorizationMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 HStack(spacing: 14) {
                     Text("Input Level")
                     Spacer()
@@ -122,7 +152,7 @@ struct SettingsView: View {
 
     private var realtimeModelSettings: some View {
         Form {
-            Section("Provider") {
+            Section("Realtime") {
                 Picker("Provider", selection: $provider) {
                     ForEach(ModelProvider.allCases) { provider in
                         Text(provider.rawValue).tag(provider.rawValue)
@@ -131,18 +161,14 @@ struct SettingsView: View {
 
                 TextField("API Base URL", text: $apiBaseURL)
                 SecureField("API Key", text: $apiKey)
-            }
-
-            Section("Realtime Pipeline") {
                 Picker("Local Language", selection: $localLanguage) {
                     ForEach(LocalMeetingLanguage.allCases) { language in
                         Text(language.label).tag(language.rawValue)
                     }
                 }
-                TextField("Realtime ASR / Audio Model", text: $realtimeModel)
                 TextField("Translation Model", text: $translationModel)
                 TextField("Summary Model", text: $summaryModel)
-                Text("PowerMeetings listens for Mandarin and English locally. Speech matching the local language is shown as-is; the other language is translated using the configured model.")
+                Text("Live transcription uses macOS Speech locally when Speech Recognition is authorized. The model provider is only used for realtime translation and meeting summaries.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -212,7 +238,6 @@ struct SettingsView: View {
         provider = modelSettings.provider
         apiBaseURL = modelSettings.apiBaseURL
         apiKey = modelSettings.apiKey
-        realtimeModel = modelSettings.realtimeModel
         translationModel = modelSettings.translationModel
         summaryModel = modelSettings.summaryModel
         localLanguage = modelSettings.localLanguage
@@ -222,6 +247,100 @@ struct SettingsView: View {
         chatAgentPort = modelSettings.chatAgentPort
         chatAgentBasePath = modelSettings.chatAgentBasePath
         chatAgentAuthToken = modelSettings.chatAgentAuthToken
+    }
+
+    private var speechAuthorizationLabel: String {
+        switch speechAuthorizationStatus {
+        case .authorized:
+            "Authorized"
+        case .notDetermined:
+            "Not Authorized"
+        case .denied:
+            "Denied"
+        case .restricted:
+            "Restricted"
+        @unknown default:
+            "Unknown"
+        }
+    }
+
+    private var speechAuthorizationButtonTitle: String {
+        speechAuthorizationStatus == .notDetermined ? "Request Access" : "Open System Settings"
+    }
+
+    private var speechAuthorizationColor: Color {
+        switch speechAuthorizationStatus {
+        case .authorized:
+            AppTheme.moss
+        case .notDetermined:
+            AppTheme.amber
+        case .denied, .restricted:
+            .red
+        @unknown default:
+            AppTheme.muted
+        }
+    }
+
+    private func refreshSpeechAuthorizationStatus() {
+        speechAuthorizationStatus = SpeechAuthorizationBridge.currentStatus
+        speechAuthorizationMessage = speechAuthorizationMessage(for: speechAuthorizationStatus)
+    }
+
+    @MainActor
+    private func requestSpeechAuthorization() async {
+        refreshSpeechAuthorizationStatus()
+
+        if speechAuthorizationStatus == .notDetermined {
+            isRequestingSpeechAuthorization = true
+            speechAuthorizationMessage = "Requesting Speech Recognition access. If macOS does not show a prompt, open System Settings and enable PowerMeetings manually."
+
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                if isRequestingSpeechAuthorization {
+                    speechAuthorizationMessage = "Still waiting for macOS Speech Recognition. If no prompt appeared, use Open System Settings and enable PowerMeetings under Privacy & Security > Speech Recognition."
+                }
+            }
+
+            let status = await SpeechAuthorizationBridge.requestStatus()
+            isRequestingSpeechAuthorization = false
+            speechAuthorizationStatus = status
+            speechAuthorizationMessage = speechAuthorizationMessage(for: status)
+            if status != .authorized {
+                openSpeechPrivacySettings()
+            }
+        } else {
+            speechAuthorizationMessage = speechAuthorizationMessage(for: speechAuthorizationStatus)
+            openSpeechPrivacySettings()
+        }
+    }
+
+    private func speechAuthorizationMessage(for status: SFSpeechRecognizerAuthorizationStatus) -> String {
+        switch status {
+        case .authorized:
+            "Speech Recognition is authorized. Live transcription can run locally."
+        case .notDetermined:
+            "macOS has not shown the Speech Recognition prompt yet."
+        case .denied:
+            "Speech Recognition was denied. Enable it in System Settings to use live transcription."
+        case .restricted:
+            "Speech Recognition is restricted on this Mac."
+        @unknown default:
+            "Speech Recognition status is unknown."
+        }
+    }
+
+    private func openSpeechPrivacySettings() {
+        #if os(macOS)
+        let urls = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy"
+        ]
+        for text in urls {
+            if let url = URL(string: text), NSWorkspace.shared.open(url) {
+                break
+            }
+        }
+        #endif
     }
 
     private func saveDraftValues() {
@@ -235,7 +354,6 @@ struct SettingsView: View {
         modelSettings.provider = provider
         modelSettings.apiBaseURL = apiBaseURL
         modelSettings.apiKey = apiKey
-        modelSettings.realtimeModel = realtimeModel
         modelSettings.translationModel = translationModel
         modelSettings.summaryModel = summaryModel
         modelSettings.localLanguage = localLanguage

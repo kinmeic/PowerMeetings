@@ -3,81 +3,122 @@ import Combine
 import Foundation
 import Speech
 
-private enum SpeechAuthorizationBridge {
+enum SpeechAuthorizationBridge {
     nonisolated static var currentStatus: SFSpeechRecognizerAuthorizationStatus {
         SFSpeechRecognizer.authorizationStatus()
+    }
+
+    nonisolated static func requestStatus() async -> SFSpeechRecognizerAuthorizationStatus {
+        await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { status in
+                continuation.resume(returning: status)
+            }
+        }
+    }
+}
+
+enum MicrophoneAuthorizationBridge {
+    nonisolated static var currentStatus: AVAuthorizationStatus {
+        AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    nonisolated static func requestAccess() async -> Bool {
+        await withCheckedContinuation { continuation in
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                continuation.resume(returning: granted)
+            }
+        }
     }
 }
 
 private final class LiveSpeechTranscriber: @unchecked Sendable {
-    private var speechEngine: AVAudioEngine?
-    private var recognitionRequests: [SFSpeechAudioBufferRecognitionRequest] = []
-    private var recognitionTasks: [SFSpeechRecognitionTask] = []
+    private var recognitionTask: SFSpeechRecognitionTask?
 
     func start(
         languageIDs: [String],
         onTranscript: @escaping @Sendable (String, String) -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
-        Task {
-            let status = SpeechAuthorizationBridge.currentStatus
-            guard status == .authorized else {
-                onUnavailable("Realtime transcription is off. Speech recognition is not authorized, and recording will continue normally.")
-                return
-            }
-
-            let recognizers = languageIDs.compactMap { languageID -> (String, SFSpeechRecognizer)? in
-                guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: languageID)),
-                      recognizer.isAvailable else { return nil }
-                return (languageID, recognizer)
-            }
-            guard recognizers.isEmpty == false else {
-                onUnavailable("Speech recognizer is unavailable for Mandarin and English.")
-                return
-            }
-
-            let engine = AVAudioEngine()
-            let requests = recognizers.map { _ in
-                let request = SFSpeechAudioBufferRecognitionRequest()
-                request.shouldReportPartialResults = true
-                return request
-            }
-
-            let inputNode = engine.inputNode
-            let format = inputNode.outputFormat(forBus: 0)
-            inputNode.removeTap(onBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-                requests.forEach { $0.append(buffer) }
-            }
-
-            recognitionTasks = zip(recognizers, requests).map { pair, request in
-                let (languageID, recognizer) = pair
-                return recognizer.recognitionTask(with: request) { result, _ in
-                    if let transcript = result?.bestTranscription.formattedString {
-                        onTranscript(transcript, languageID)
-                    }
-                }
-            }
-
-            do {
-                engine.prepare()
-                try engine.start()
-                speechEngine = engine
-                recognitionRequests = requests
-            } catch {
-                onUnavailable("Could not start speech recognition: \(error.localizedDescription)")
-            }
+        let status = SpeechAuthorizationBridge.currentStatus
+        guard status == .authorized else {
+            onUnavailable("Realtime transcription is off. Speech recognition is not authorized, and recording will continue normally.")
+            return
         }
+
+        guard let languageID = languageIDs.first,
+              let recognizer = SFSpeechRecognizer(locale: Locale(identifier: languageID)) else {
+            onUnavailable("Speech recognizer is unavailable for the selected local language.")
+            return
+        }
+
+        guard recognizer.supportsOnDeviceRecognition else {
+            onUnavailable("On-device Speech Recognition is not available for \(languageID) on this Mac. Recording will continue normally.")
+            return
+        }
+
+        guard recognizer.isAvailable else {
+            onUnavailable("On-device Speech Recognition is unavailable right now. Recording will continue normally.")
+            return
+        }
+
+        // On-device live transcription will be wired through SpeechAnalyzer; keep recording independent.
     }
 
     func stop() {
-        speechEngine?.inputNode.removeTap(onBus: 0)
-        speechEngine?.stop()
-        recognitionRequests.forEach { $0.endAudio() }
-        recognitionTasks.forEach { $0.cancel() }
-        speechEngine = nil
-        recognitionRequests = []
-        recognitionTasks = []
+        recognitionTask?.cancel()
+        recognitionTask = nil
+    }
+}
+
+private final class AudioFileWriter: @unchecked Sendable {
+    private let file: AVAudioFile
+
+    init(file: AVAudioFile) {
+        self.file = file
+    }
+
+    func write(_ buffer: AVAudioPCMBuffer) throws {
+        try file.write(from: buffer)
+    }
+}
+
+private final class AudioTapCallbacks: @unchecked Sendable {
+    let onLevel: @Sendable (Double) -> Void
+    let onError: @Sendable (String) -> Void
+
+    init(
+        onLevel: @escaping @Sendable (Double) -> Void,
+        onError: @escaping @Sendable (String) -> Void
+    ) {
+        self.onLevel = onLevel
+        self.onError = onError
+    }
+}
+
+private enum AudioMeterCalculator {
+    static func audioLevel(from buffer: AVAudioPCMBuffer) -> Double {
+        guard let channelData = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+        let channelCount = Int(buffer.format.channelCount)
+        let frameLength = Int(buffer.frameLength)
+        var totalSquares = 0.0
+        var sampleCount = 0
+
+        for channel in 0..<channelCount {
+            let samples = channelData[channel]
+            for frame in 0..<frameLength {
+                let sample = Double(samples[frame])
+                totalSquares += sample * sample
+            }
+            sampleCount += frameLength
+        }
+
+        guard sampleCount > 0 else { return 0 }
+        return normalizedMeterLevel(rms: sqrt(totalSquares / Double(sampleCount))) ?? 0
+    }
+
+    static func normalizedMeterLevel(rms: Double) -> Double? {
+        guard rms.isFinite else { return nil }
+        return min(1, max(0.03, pow(rms * 12, 0.65)))
     }
 }
 
@@ -169,7 +210,7 @@ final class SettingsAudioLevelMonitor: NSObject, ObservableObject, AVCaptureAudi
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard let level = AudioCaptureEngine.audioLevel(from: sampleBuffer) else { return }
+        guard let level = AudioCaptureEngine.audioLevel(from: connection) ?? AudioCaptureEngine.audioLevel(from: sampleBuffer) else { return }
         Task { @MainActor in
             self.level = level
         }
@@ -189,7 +230,7 @@ final class SettingsAudioLevelMonitor: NSObject, ObservableObject, AVCaptureAudi
 }
 
 @MainActor
-final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDelegate {
     enum State: Equatable {
         case idle
         case recording(startedAt: Date)
@@ -205,24 +246,16 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published private(set) var isPlaying = false
     @Published private(set) var recordingURL: URL?
     @Published private(set) var activeMeetingID: Meeting.ID?
+    @Published private(set) var isFinalizingRecording = false
 
+    private var audioRecorder: AVAudioRecorder?
+    private var audioPlayer: AVAudioPlayer?
     private var levelTimer: Timer?
     private var elapsedTimer: Timer?
     private var playbackTimer: Timer?
     private var accumulatedElapsed: TimeInterval = 0
-    private var captureSession: AVCaptureSession?
-    private var audioOutput: AVCaptureAudioFileOutput?
-    private let captureQueue = DispatchQueue(label: "PowerMeetings.AudioCapture")
-    private let meterQueue = DispatchQueue(label: "PowerMeetings.AudioMeter")
-    private var lastMeterUpdate = Date.distantPast
-    private var segmentURLs: [URL] = []
-    private var currentSegmentURL: URL?
-    private var shouldFinalizeRecordingWhenSegmentStops = false
-    private var recordingDirectory: URL?
-    private var audioPlayer: AVAudioPlayer?
-    private var playbackStartedAt: Date?
-    private var playbackStartPosition: TimeInterval = 0
     private var lastSettings = AudioCaptureSettings()
+    var onRecordingReady: (@MainActor (URL, TimeInterval) -> Void)?
 
     var isRecording: Bool {
         if case .recording = state { return true }
@@ -233,6 +266,13 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
         state == .paused
     }
 
+    var failureMessage: String? {
+        if case let .failed(message) = state {
+            return message
+        }
+        return nil
+    }
+
     func elapsed(at date: Date) -> TimeInterval {
         if case let .recording(startedAt) = state {
             return accumulatedElapsed + date.timeIntervalSince(startedAt)
@@ -241,51 +281,70 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     func meterLevel(at date: Date) -> Double {
-        guard isRecording else { return 0 }
-        if date.timeIntervalSince(lastMeterUpdate) <= 0.5, inputLevel > 0.04 {
-            return inputLevel
+        isRecording ? inputLevel : 0
+    }
+
+    @discardableResult
+    func start(settings: AudioCaptureSettings, meetingID: Meeting.ID) -> Bool {
+        stop()
+        guard MicrophoneAuthorizationBridge.currentStatus == .authorized else {
+            state = .failed("Microphone access is not authorized. Grant Microphone access in macOS System Settings.")
+            return false
         }
 
-        // Visual-only fallback when metering is temporarily interrupted by macOS audio services.
-        let t = date.timeIntervalSinceReferenceDate
-        let pulse = 0.16 + 0.10 * sin(t * 8.7) + 0.06 * sin(t * 17.3)
-        return min(0.34, max(0.06, pulse))
-    }
-
-    override init() {
-        super.init()
-    }
-
-    func start(settings: AudioCaptureSettings, meetingID: Meeting.ID) {
         accumulatedElapsed = 0
         elapsed = 0
         playbackPosition = 0
+        inputLevel = 0
         isPlaying = false
+        isFinalizingRecording = false
         activeMeetingID = meetingID
         lastSettings = settings
-        segmentURLs = []
-        recordingURL = nil
-        audioPlayer = nil
-        recordingDirectory = makeRecordingDirectory()
-        startCapture(settings: settings)
+        onRecordingReady = nil
+
+        let url = makeRecordingDirectory().appendingPathComponent("recording-\(UUID().uuidString).m4a")
+        do {
+            let recorder = try AVAudioRecorder(url: url, settings: Self.recordingSettings)
+            recorder.delegate = self
+            recorder.isMeteringEnabled = true
+            guard recorder.prepareToRecord(), recorder.record() else {
+                state = .failed("Could not start the audio recorder.")
+                activeMeetingID = nil
+                return false
+            }
+            audioRecorder = recorder
+            recordingURL = url
+        } catch {
+            state = .failed("Could not start recording: \(error.localizedDescription)")
+            activeMeetingID = nil
+            return false
+        }
+
         state = .recording(startedAt: Date())
         startMeters()
+        return true
     }
 
     func pause() {
         guard case let .recording(startedAt) = state else { return }
         accumulatedElapsed += Date().timeIntervalSince(startedAt)
         elapsed = accumulatedElapsed
-        stopCurrentSegment()
+        audioRecorder?.pause()
         state = .paused
         stopMeters()
+        inputLevel = 0
     }
 
-    func resume() {
-        guard state == .paused else { return }
-        startCapture(settings: lastSettings)
+    @discardableResult
+    func resume() -> Bool {
+        guard state == .paused, let recorder = audioRecorder else { return false }
+        guard recorder.record() else {
+            state = .failed("Could not resume recording.")
+            return false
+        }
         state = .recording(startedAt: Date())
         startMeters()
+        return true
     }
 
     func end() {
@@ -293,21 +352,20 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
             accumulatedElapsed += Date().timeIntervalSince(startedAt)
             elapsed = accumulatedElapsed
         }
-        let waitsForRecordingDelegate = audioOutput?.isRecording == true
-        shouldFinalizeRecordingWhenSegmentStops = waitsForRecordingDelegate
-        stopCurrentSegment()
-        if waitsForRecordingDelegate == false {
-            finishMergedRecording()
-        }
+        audioRecorder?.stop()
+        audioRecorder = nil
         state = .ended
         inputLevel = 0
         playbackPosition = 0
         stopMeters()
         stopPlayback()
         activeMeetingID = nil
+        notifyRecordingReadyIfNeeded()
     }
 
     func stop() {
+        audioRecorder?.stop()
+        audioRecorder = nil
         state = .idle
         activeMeetingID = nil
         accumulatedElapsed = 0
@@ -315,8 +373,8 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
         playbackPosition = 0
         inputLevel = 0
         recordingURL = nil
-        segmentURLs = []
-        stopCurrentSegment()
+        isFinalizingRecording = false
+        onRecordingReady = nil
         stopMeters()
         stopPlayback()
     }
@@ -331,23 +389,20 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
             audioPlayer?.currentTime = playbackPosition
             audioPlayer?.play()
         } catch {
-            state = .failed(error.localizedDescription)
+            state = .failed("Could not play recording: \(error.localizedDescription)")
             return
         }
+
         isPlaying = true
-        playbackStartedAt = Date()
-        playbackStartPosition = playbackPosition
         playbackTimer?.invalidate()
         playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 if let player = self.audioPlayer {
                     self.playbackPosition = min(self.elapsed, player.currentTime)
-                } else if let playbackStartedAt = self.playbackStartedAt {
-                    self.playbackPosition = min(self.elapsed, self.playbackStartPosition + Date().timeIntervalSince(playbackStartedAt))
-                }
-                if self.playbackPosition >= self.elapsed {
-                    self.stopPlayback()
+                    if player.isPlaying == false || self.playbackPosition >= self.elapsed {
+                        self.stopPlayback()
+                    }
                 }
             }
         }
@@ -358,16 +413,11 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
         audioPlayer?.stop()
         playbackTimer?.invalidate()
         playbackTimer = nil
-        playbackStartedAt = nil
     }
 
     func seekPlayback(to position: TimeInterval) {
         playbackPosition = min(max(0, position), max(elapsed, 0))
         audioPlayer?.currentTime = playbackPosition
-        if isPlaying {
-            playbackStartedAt = Date()
-            playbackStartPosition = playbackPosition
-        }
     }
 
     func exportRecording(to destination: URL) throws {
@@ -399,18 +449,9 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
 
         levelTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
-                guard self.isRecording else {
-                    self.inputLevel = 0
-                    return
-                }
-
-                // Keep the UI alive even if the meter delegate has not produced a sample yet.
-                if Date().timeIntervalSince(self.lastMeterUpdate) > 0.5 {
-                    self.inputLevel = Double.random(in: 0.10...0.42)
-                } else {
-                    self.inputLevel = max(0, self.inputLevel * 0.92)
-                }
+                guard let self, self.isRecording, let recorder = self.audioRecorder else { return }
+                recorder.updateMeters()
+                self.inputLevel = Self.normalizedPower(recorder.averagePower(forChannel: 0))
             }
         }
 
@@ -429,160 +470,9 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
         elapsedTimer = nil
     }
 
-    private func startCapture(settings: AudioCaptureSettings) {
-        let session = AVCaptureSession()
-        session.beginConfiguration()
-
-        guard let device = selectedAudioDevice(id: settings.inputDeviceID),
-              let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else {
-            state = .failed("Could not access the selected audio input device.")
-            return
-        }
-        session.addInput(input)
-
-        let output = AVCaptureAudioFileOutput()
-        guard session.canAddOutput(output) else {
-            state = .failed("Could not create audio recording output.")
-            return
-        }
-        session.addOutput(output)
-
-        let meterOutput = AVCaptureAudioDataOutput()
-        if session.canAddOutput(meterOutput) {
-            meterOutput.setSampleBufferDelegate(self, queue: meterQueue)
-            session.addOutput(meterOutput)
-        }
-
-        output.audioSettings = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 32_000
-        ]
-        session.commitConfiguration()
-
-        captureSession = session
-        audioOutput = output
-
-        let segmentURL = makeSegmentURL()
-        currentSegmentURL = segmentURL
-        segmentURLs.append(segmentURL)
-        captureQueue.async { [weak self, session, output, segmentURL] in
-            session.startRunning()
-            Task { @MainActor in
-                guard let self, self.captureSession === session else { return }
-                output.startRecording(to: segmentURL, recordingDelegate: self)
-            }
-        }
-    }
-
-    private func stopCurrentSegment() {
-        let output = audioOutput
-        let session = captureSession
-        captureSession = nil
-        audioOutput = nil
-        currentSegmentURL = nil
-        captureQueue.async { [output, session] in
-            if output?.isRecording == true {
-                output?.stopRecording()
-            }
-            session?.stopRunning()
-        }
-    }
-
-    nonisolated func fileOutput(
-        _ output: AVCaptureFileOutput,
-        didFinishRecordingTo outputFileURL: URL,
-        from connections: [AVCaptureConnection],
-        error: Error?
-    ) {
-        if let error {
-            Task { @MainActor in
-                self.state = .failed(error.localizedDescription)
-            }
-        } else {
-            Task { @MainActor in
-                guard self.shouldFinalizeRecordingWhenSegmentStops else { return }
-                self.shouldFinalizeRecordingWhenSegmentStops = false
-                self.finishMergedRecording()
-            }
-        }
-    }
-
-    nonisolated func captureOutput(
-        _ output: AVCaptureOutput,
-        didOutput sampleBuffer: CMSampleBuffer,
-        from connection: AVCaptureConnection
-    ) {
-        guard let level = Self.audioLevel(from: sampleBuffer) else { return }
-        Task { @MainActor in
-            self.lastMeterUpdate = Date()
-            self.inputLevel = level
-        }
-    }
-
-    private func finishMergedRecording() {
-        let existingSegments = segmentURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
-        guard existingSegments.isEmpty == false else { return }
-        if existingSegments.count == 1 {
-            recordingURL = existingSegments[0]
-            return
-        }
-
-        let composition = AVMutableComposition()
-        guard let compositionTrack = composition.addMutableTrack(
-            withMediaType: .audio,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) else {
-            recordingURL = existingSegments.last
-            return
-        }
-
-        var cursor = CMTime.zero
-        for url in existingSegments {
-            let asset = AVURLAsset(url: url)
-            guard let track = asset.tracks(withMediaType: .audio).first else { continue }
-            do {
-                try compositionTrack.insertTimeRange(
-                    CMTimeRange(start: .zero, duration: asset.duration),
-                    of: track,
-                    at: cursor
-                )
-                cursor = cursor + asset.duration
-            } catch {
-                recordingURL = existingSegments.last
-                return
-            }
-        }
-
-        let mergedURL = (recordingDirectory ?? makeRecordingDirectory())
-            .appendingPathComponent("recording-\(UUID().uuidString).m4a")
-        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
-            recordingURL = existingSegments.last
-            return
-        }
-        exporter.outputURL = mergedURL
-        exporter.outputFileType = .m4a
-
-        let semaphore = DispatchSemaphore(value: 0)
-        exporter.exportAsynchronously {
-            semaphore.signal()
-        }
-        semaphore.wait()
-        recordingURL = FileManager.default.fileExists(atPath: mergedURL.path) ? mergedURL : existingSegments.last
-    }
-
-    private func selectedAudioDevice(id: String?) -> AVCaptureDevice? {
-        let session = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone, .external],
-            mediaType: .audio,
-            position: .unspecified
-        )
-        if let id, let selected = session.devices.first(where: { $0.uniqueID == id }) {
-            return selected
-        }
-        return AVCaptureDevice.default(for: .audio) ?? session.devices.first
+    private func notifyRecordingReadyIfNeeded() {
+        guard let recordingURL else { return }
+        onRecordingReady?(recordingURL, elapsed)
     }
 
     private func makeRecordingDirectory() -> URL {
@@ -592,12 +482,6 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
-    }
-
-    private func makeSegmentURL() -> URL {
-        let directory = recordingDirectory ?? makeRecordingDirectory()
-        recordingDirectory = directory
-        return directory.appendingPathComponent("segment-\(segmentURLs.count + 1).m4a")
     }
 
     private func audioDuration(url: URL) -> TimeInterval? {
@@ -635,66 +519,30 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVCaptureFileOutputR
             }
         }
 
-        var bufferListSize = 0
-        CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: &bufferListSize,
-            bufferListOut: nil,
-            bufferListSize: 0,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: nil
-        )
-        guard bufferListSize > 0 else { return nil }
+        return nil
+    }
 
-        var retainedBlockBuffer: CMBlockBuffer?
-        var bufferListData = Data(count: bufferListSize)
-        let status = bufferListData.withUnsafeMutableBytes { rawBuffer in
-            CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-                sampleBuffer,
-                bufferListSizeNeededOut: nil,
-                bufferListOut: rawBuffer.baseAddress!.assumingMemoryBound(to: AudioBufferList.self),
-                bufferListSize: bufferListSize,
-                blockBufferAllocator: kCFAllocatorDefault,
-                blockBufferMemoryAllocator: kCFAllocatorDefault,
-                flags: 0,
-                blockBufferOut: &retainedBlockBuffer
-            )
-        }
-        guard status == noErr else { return nil }
+    nonisolated fileprivate static func audioLevel(from connection: AVCaptureConnection) -> Double? {
+        let powers = connection.audioChannels
+            .map(\.averagePowerLevel)
+            .filter { $0.isFinite }
+        guard powers.isEmpty == false else { return nil }
+        return normalizedPower(powers.reduce(0, +) / Float(powers.count))
+    }
 
-        let rms = bufferListData.withUnsafeMutableBytes { rawBuffer -> Double? in
-            let audioBufferList = rawBuffer.baseAddress!.assumingMemoryBound(to: AudioBufferList.self)
-            let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            var totalSquares = 0.0
-            var sampleCount = 0
+    nonisolated private static var recordingSettings: [String: Any] {
+        [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 32_000
+        ]
+    }
 
-            for buffer in buffers {
-                guard let data = buffer.mData, buffer.mDataByteSize > 0 else { continue }
-                let rawSamples = UnsafeRawBufferPointer(start: data, count: Int(buffer.mDataByteSize))
-                if isFloat && bitsPerChannel == 32 {
-                    let samples = rawSamples.bindMemory(to: Float.self)
-                    for sample in samples {
-                        totalSquares += Double(sample * sample)
-                    }
-                    sampleCount += samples.count
-                } else if bitsPerChannel == 16 {
-                    let samples = rawSamples.bindMemory(to: Int16.self)
-                    for sample in samples {
-                        let normalized = Double(sample) / Double(Int16.max)
-                        totalSquares += normalized * normalized
-                    }
-                    sampleCount += samples.count
-                }
-            }
-
-            guard sampleCount > 0 else { return nil }
-            return sqrt(totalSquares / Double(sampleCount))
-        }
-
-        guard let rms else { return nil }
-        return normalizedMeterLevel(rms: rms)
+    nonisolated private static func normalizedPower(_ power: Float) -> Double {
+        guard power.isFinite else { return 0 }
+        let linear = pow(10, Double(power) / 20)
+        return min(1, max(0, pow(linear * 6, 0.7)))
     }
 
     nonisolated private static func rmsLevel(data: Data, bitsPerChannel: Int, isFloat: Bool) -> Double? {
@@ -760,6 +608,7 @@ final class MeetingSessionViewModel: ObservableObject {
     private var transcriptTimer: Timer?
     private var activeMeetingID: UUID?
     private var appendSegment: (@MainActor (TranscriptSegment) -> Void)?
+    private var updateSegmentTranslation: (@MainActor (TranscriptSegment.ID, String) -> Void)?
     private var speechTranscriber: LiveSpeechTranscriber?
     private var lastEmittedTranscripts: [String: String] = [:]
     private var modelConfiguration = ModelConfiguration()
@@ -767,22 +616,20 @@ final class MeetingSessionViewModel: ObservableObject {
     func startLiveTranscription(
         for meetingID: UUID,
         configuration: ModelConfiguration,
-        append: @escaping @MainActor (TranscriptSegment) -> Void
+        append: @escaping @MainActor (TranscriptSegment) -> Void,
+        updateTranslation: @escaping @MainActor (TranscriptSegment.ID, String) -> Void
     ) {
         stopDemoTranscript()
         modelConfiguration = configuration
         demoIndex = 0
         activeMeetingID = meetingID
         appendSegment = append
-        guard configuration.realtimeModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-            return
-        }
+        updateSegmentTranslation = updateTranslation
         startSpeechRecognition()
     }
 
     func resumeLiveTranscription() {
         guard activeMeetingID != nil else { return }
-        guard modelConfiguration.realtimeModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return }
         startSpeechRecognition()
     }
 
@@ -820,6 +667,7 @@ final class MeetingSessionViewModel: ObservableObject {
         transcriptTimer = nil
         activeMeetingID = nil
         appendSegment = nil
+        updateSegmentTranslation = nil
     }
 
     private func startSpeechRecognition() {
@@ -827,7 +675,7 @@ final class MeetingSessionViewModel: ObservableObject {
         let transcriber = LiveSpeechTranscriber()
         speechTranscriber = transcriber
         transcriber.start(
-            languageIDs: LocalMeetingLanguage.allCases.map(\.rawValue),
+            languageIDs: [modelConfiguration.localLanguage],
             onTranscript: { [weak self] transcript, languageID in
                 Task { @MainActor in
                     self?.emitTranscriptIfNeeded(transcript, languageID: languageID)
@@ -864,29 +712,29 @@ final class MeetingSessionViewModel: ObservableObject {
             && modelConfiguration.translationModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         let shouldTranslate = languageID != localLanguage && hasTranslationConfiguration
 
+        let segment = TranscriptSegment(
+            meetingID: activeMeetingID,
+            timestamp: timestamp,
+            speaker: "Speaker · \(languageLabel(for: languageID))",
+            sourceText: delta,
+            translatedText: delta,
+            kind: delta.contains("?") || delta.contains("？") ? .question : .transcript,
+            confidence: 0.82
+        )
+        appendSegment(segment)
+
+        guard shouldTranslate, let updateSegmentTranslation else { return }
         Task {
-            let translated: String
-            if shouldTranslate {
-                translated = (try? await MeetingAIClient().translateText(
-                    delta,
-                    targetLanguage: LocalMeetingLanguage(rawValue: localLanguage)?.translationTarget ?? "Chinese (Mandarin, Simplified Chinese)",
-                    configuration: modelConfiguration
-                )) ?? delta
-            } else {
-                translated = delta
-            }
+            guard let translated = try? await MeetingAIClient().translateText(
+                delta,
+                targetLanguage: LocalMeetingLanguage(rawValue: localLanguage)?.translationTarget ?? "Chinese (Mandarin, Simplified Chinese)",
+                configuration: modelConfiguration
+            ),
+                  translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                  translated != delta else { return }
+
             await MainActor.run {
-                appendSegment(
-                    TranscriptSegment(
-                        meetingID: activeMeetingID,
-                        timestamp: timestamp,
-                        speaker: "Speaker · \(languageLabel(for: languageID))",
-                        sourceText: delta,
-                        translatedText: translated,
-                        kind: delta.contains("?") || delta.contains("？") ? .question : .transcript,
-                        confidence: 0.82
-                    )
-                )
+                updateSegmentTranslation(segment.id, translated)
             }
         }
     }

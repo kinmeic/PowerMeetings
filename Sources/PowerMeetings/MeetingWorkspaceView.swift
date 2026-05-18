@@ -68,11 +68,8 @@ struct MeetingWorkspaceView: View {
     private func startMeeting(meeting: Meeting) {
         guard meetingStore.canStartMeeting(id: meeting.id) else { return }
         let settings = AudioCaptureSettings(inputDeviceID: audioDeviceManager.selectedDeviceID)
-        audioEngine.start(settings: settings, meetingID: meeting.id)
+        guard audioEngine.start(settings: settings, meetingID: meeting.id) else { return }
         meetingStore.updateMeeting(id: meeting.id) { $0.status = .inProgress }
-        session.startLiveTranscription(for: meeting.id, configuration: modelSettings.configuration) { segment in
-            meetingStore.appendSegment(segment)
-        }
     }
 
     private func pauseMeeting(meeting: Meeting) {
@@ -84,7 +81,7 @@ struct MeetingWorkspaceView: View {
     }
 
     private func resumeMeeting(meeting: Meeting) {
-        audioEngine.resume()
+        guard audioEngine.resume() else { return }
         session.resumeLiveTranscription()
         meetingStore.updateMeeting(id: meeting.id) {
             $0.status = .inProgress
@@ -92,9 +89,14 @@ struct MeetingWorkspaceView: View {
     }
 
     private func endMeeting(meeting: Meeting) {
+        audioEngine.onRecordingReady = { url, duration in
+            meetingStore.updateMeeting(id: meeting.id) {
+                $0.recordingFilePath = url.path
+                $0.duration = duration
+            }
+        }
         audioEngine.end()
         session.stopDemoTranscript()
-        let recordingPath = audioEngine.recordingURL?.path
         let duration = audioEngine.elapsed
         selectedTab = "Summary"
         meetingStore.updateMeeting(id: meeting.id) {
@@ -102,7 +104,6 @@ struct MeetingWorkspaceView: View {
             if $0.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || $0.summary == "No summary yet." {
                 $0.summary = "No summary yet. Click Generate Summary when you are ready."
             }
-            $0.recordingFilePath = recordingPath
             $0.duration = duration
         }
         summaryTask?.cancel()
@@ -244,17 +245,25 @@ private struct AudioControlBar: View {
     let onExport: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            controls
-                .fixedSize(horizontal: true, vertical: false)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                controls
+                    .fixedSize(horizontal: true, vertical: false)
 
-            if meetingStatus == .completed {
-                playbackTimeline
-            } else {
-                recordingTimeline
+                if meetingStatus == .completed {
+                    playbackTimeline
+                } else {
+                    recordingTimeline
+                }
+
+                Spacer()
             }
 
-            Spacer()
+            if let failureMessage = audioEngine.failureMessage {
+                Label(failureMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
@@ -295,11 +304,17 @@ private struct AudioControlBar: View {
                 .font(.headline)
                 .foregroundStyle(AppTheme.muted)
         case .completed:
-            primaryButton(audioEngine.isPlaying ? "Stop" : "Play", systemImage: audioEngine.isPlaying ? "stop.fill" : "play.fill", color: audioEngine.isPlaying ? .red : AppTheme.ink) {
-                if audioEngine.isPlaying {
-                    onStopPlayback()
-                } else {
-                    onPlay()
+            if audioEngine.isFinalizingRecording {
+                Label("Saving...", systemImage: "hourglass")
+                    .font(.headline)
+                    .foregroundStyle(AppTheme.muted)
+            } else {
+                primaryButton(audioEngine.isPlaying ? "Stop" : "Play", systemImage: audioEngine.isPlaying ? "stop.fill" : "play.fill", color: audioEngine.isPlaying ? .red : AppTheme.ink) {
+                    if audioEngine.isPlaying {
+                        onStopPlayback()
+                    } else {
+                        onPlay()
+                    }
                 }
             }
         }
@@ -418,7 +433,6 @@ private struct TranscriptTimelineView: View {
         VStack(spacing: 12) {
             if isModelConfigured == false {
                 ProviderStatusBanner(
-                    realtimeModel: modelConfiguration.realtimeModel,
                     translationModel: modelConfiguration.translationModel
                 )
             }
@@ -445,7 +459,6 @@ private struct TranscriptTimelineView: View {
 }
 
 private struct ProviderStatusBanner: View {
-    let realtimeModel: String
     let translationModel: String
 
     var body: some View {
@@ -456,7 +469,7 @@ private struct ProviderStatusBanner: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Realtime translation provider is not connected")
                     .font(.callout.bold())
-                Text("ASR: \(realtimeModel) · Translation: \(translationModel)")
+                Text("ASR: macOS Speech · Translation: \(translationModel)")
                     .font(.caption)
                     .foregroundStyle(AppTheme.muted)
                     .lineLimit(1)

@@ -162,6 +162,12 @@ final class MeetingStore: ObservableObject {
         save()
     }
 
+    func updateSegmentTranslation(id: TranscriptSegment.ID, translatedText: String) {
+        guard let index = segments.firstIndex(where: { $0.id == id }) else { return }
+        segments[index].translatedText = translatedText
+        save()
+    }
+
     func agentMessages(for meetingID: Meeting.ID) -> [AgentMessage] {
         agentMessagesByMeeting[meetingID] ?? defaultAgentMessages()
     }

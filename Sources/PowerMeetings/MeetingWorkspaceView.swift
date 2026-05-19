@@ -73,6 +73,16 @@ struct MeetingWorkspaceView: View {
         guard meetingStore.canStartMeeting(id: meeting.id) else { return }
         let settings = AudioCaptureSettings(inputDeviceID: audioDeviceManager.selectedDeviceID)
         guard audioEngine.start(settings: settings, meetingID: meeting.id) else { return }
+        session.startLiveTranscription(
+            for: meeting.id,
+            configuration: modelSettings.configuration,
+            append: { segment in
+                meetingStore.appendSegment(segment)
+            },
+            updateTranslation: { id, translatedText in
+                meetingStore.updateSegmentTranslation(id: id, translatedText: translatedText)
+            }
+        )
         meetingStore.updateMeeting(id: meeting.id) { $0.status = .inProgress }
     }
 

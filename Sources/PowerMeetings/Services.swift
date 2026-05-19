@@ -32,13 +32,39 @@ enum MicrophoneAuthorizationBridge {
 }
 
 private final class LiveSpeechTranscriber: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "PowerMeetings.LiveSpeechTranscriber")
+    private var audioEngine: AVAudioEngine?
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var isStoppingIntentionally = false
 
     func start(
         languageIDs: [String],
         onTranscript: @escaping @Sendable (String, String) -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
+        queue.async { [weak self] in
+            self?.startOnQueue(
+                languageIDs: languageIDs,
+                onTranscript: onTranscript,
+                onUnavailable: onUnavailable
+            )
+        }
+    }
+
+    func stop() {
+        queue.async { [weak self] in
+            self?.stopOnQueue()
+        }
+    }
+
+    private func startOnQueue(
+        languageIDs: [String],
+        onTranscript: @escaping @Sendable (String, String) -> Void,
+        onUnavailable: @escaping @Sendable (String) -> Void
+    ) {
+        stopOnQueue()
+
         let status = SpeechAuthorizationBridge.currentStatus
         guard status == .authorized else {
             onUnavailable("Realtime transcription is off. Speech recognition is not authorized, and recording will continue normally.")
@@ -61,12 +87,69 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
             return
         }
 
-        // On-device live transcription will be wired through SpeechAnalyzer; keep recording independent.
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            onUnavailable("Realtime transcription is off. No microphone input format was available.")
+            return
+        }
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        if #available(macOS 13.0, *) {
+            request.requiresOnDeviceRecognition = true
+        }
+        if #available(macOS 14.0, *) {
+            request.addsPunctuation = true
+        }
+
+        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            if let result {
+                let transcript = result.bestTranscription.formattedString
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if transcript.isEmpty == false {
+                    onTranscript(transcript, languageID)
+                }
+            }
+
+            if let error {
+                if self?.isStoppingIntentionally != true {
+                    onUnavailable("Realtime transcription stopped: \(error.localizedDescription)")
+                }
+                self?.stop()
+            }
+        }
+
+        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
+            request.append(buffer)
+        }
+
+        do {
+            engine.prepare()
+            try engine.start()
+            audioEngine = engine
+            recognitionRequest = request
+            isStoppingIntentionally = false
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            recognitionTask?.cancel()
+            recognitionTask = nil
+            onUnavailable("Realtime transcription could not start: \(error.localizedDescription)")
+        }
     }
 
-    func stop() {
+    private func stopOnQueue() {
+        isStoppingIntentionally = true
+        if let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        recognitionRequest?.endAudio()
+        recognitionRequest = nil
         recognitionTask?.cancel()
         recognitionTask = nil
+        audioEngine = nil
     }
 }
 
@@ -669,6 +752,8 @@ final class MeetingSessionViewModel: ObservableObject {
     private var updateSegmentTranslation: (@MainActor (TranscriptSegment.ID, String) -> Void)?
     private var speechTranscriber: LiveSpeechTranscriber?
     private var lastEmittedTranscripts: [String: String] = [:]
+    private var pendingLiveTranscripts: [String: String] = [:]
+    private var pendingLiveTranscriptTimers: [String: Timer] = [:]
     private var modelConfiguration = ModelConfiguration()
 
     func startLiveTranscription(
@@ -750,9 +835,8 @@ final class MeetingSessionViewModel: ObservableObject {
     private func emitTranscriptIfNeeded(_ transcript: String, languageID: String) {
         let cleanTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         let lastEmittedTranscript = lastEmittedTranscripts[languageID] ?? ""
-        guard cleanTranscript.count > lastEmittedTranscript.count + 12,
-              let activeMeetingID,
-              let appendSegment else { return }
+        guard cleanTranscript != lastEmittedTranscript,
+              appendSegment != nil else { return }
 
         let delta: String
         if cleanTranscript.hasPrefix(lastEmittedTranscript) {
@@ -760,8 +844,47 @@ final class MeetingSessionViewModel: ObservableObject {
         } else {
             delta = cleanTranscript
         }
-        guard delta.isEmpty == false else { return }
+        guard delta.count >= 2 else { return }
         lastEmittedTranscripts[languageID] = cleanTranscript
+
+        appendPendingTranscript(delta, languageID: languageID)
+        if shouldFlushTranscript(delta: delta, languageID: languageID) {
+            flushPendingTranscript(languageID: languageID)
+        } else {
+            schedulePendingTranscriptFlush(languageID: languageID)
+        }
+    }
+
+    private func appendPendingTranscript(_ delta: String, languageID: String) {
+        let existing = pendingLiveTranscripts[languageID] ?? ""
+        pendingLiveTranscripts[languageID] = joinedTranscript(existing, delta)
+    }
+
+    private func schedulePendingTranscriptFlush(languageID: String) {
+        pendingLiveTranscriptTimers[languageID]?.invalidate()
+        pendingLiveTranscriptTimers[languageID] = Timer.scheduledTimer(withTimeInterval: 1.05, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.flushPendingTranscript(languageID: languageID)
+            }
+        }
+    }
+
+    private func shouldFlushTranscript(delta: String, languageID: String) -> Bool {
+        let pending = pendingLiveTranscripts[languageID] ?? ""
+        if pending.count >= 42 { return true }
+        guard let last = delta.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
+        return "。！？?!.;；".contains(last)
+    }
+
+    private func flushPendingTranscript(languageID: String) {
+        pendingLiveTranscriptTimers[languageID]?.invalidate()
+        pendingLiveTranscriptTimers[languageID] = nil
+
+        let delta = (pendingLiveTranscripts[languageID] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingLiveTranscripts[languageID] = nil
+        guard delta.isEmpty == false,
+              let activeMeetingID,
+              let appendSegment else { return }
 
         let timestamp = TimeInterval(demoIndex * 8)
         demoIndex += 1
@@ -797,6 +920,31 @@ final class MeetingSessionViewModel: ObservableObject {
         }
     }
 
+    private func flushAllPendingTranscripts() {
+        for languageID in pendingLiveTranscripts.keys {
+            flushPendingTranscript(languageID: languageID)
+        }
+    }
+
+    private func joinedTranscript(_ current: String, _ delta: String) -> String {
+        let trimmedCurrent = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDelta = delta.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedCurrent.isEmpty == false else { return trimmedDelta }
+        guard trimmedDelta.isEmpty == false else { return trimmedCurrent }
+
+        let currentEndsWithSpace = trimmedCurrent.last?.isWhitespace == true
+        let deltaStartsWithPunctuation = ",，.。!！?？;；:：".contains(trimmedDelta.first ?? " ")
+        let shouldInsertSpace = currentEndsWithSpace == false
+            && deltaStartsWithPunctuation == false
+            && containsLatinText(trimmedCurrent)
+            && containsLatinText(trimmedDelta)
+        return shouldInsertSpace ? "\(trimmedCurrent) \(trimmedDelta)" : "\(trimmedCurrent)\(trimmedDelta)"
+    }
+
+    private func containsLatinText(_ text: String) -> Bool {
+        text.range(of: #"[A-Za-z0-9]"#, options: .regularExpression) != nil
+    }
+
     private func appendSpeechUnavailableSegment(reason: String) {
         guard let activeMeetingID, let appendSegment else { return }
         appendSegment(
@@ -813,10 +961,14 @@ final class MeetingSessionViewModel: ObservableObject {
     }
 
     private func stopSpeechRecognition(keepSession: Bool) {
+        flushAllPendingTranscripts()
+        pendingLiveTranscriptTimers.values.forEach { $0.invalidate() }
+        pendingLiveTranscriptTimers = [:]
         speechTranscriber?.stop()
         speechTranscriber = nil
         if keepSession == false {
             lastEmittedTranscripts = [:]
+            pendingLiveTranscripts = [:]
         }
     }
 

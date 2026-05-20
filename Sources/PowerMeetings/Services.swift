@@ -34,19 +34,21 @@ enum MicrophoneAuthorizationBridge {
 private final class LiveSpeechTranscriber: @unchecked Sendable {
     private let queue = DispatchQueue(label: "PowerMeetings.LiveSpeechTranscriber")
     private var audioEngine: AVAudioEngine?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
+    private var recognitionRequests: [SFSpeechAudioBufferRecognitionRequest] = []
+    private var recognitionTasks: [SFSpeechRecognitionTask] = []
     private var isStoppingIntentionally = false
 
     func start(
         languageIDs: [String],
         onTranscript: @escaping @Sendable (String, String) -> Void,
+        onSilence: @escaping @Sendable () -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
         queue.async { [weak self] in
             self?.startOnQueue(
                 languageIDs: languageIDs,
                 onTranscript: onTranscript,
+                onSilence: onSilence,
                 onUnavailable: onUnavailable
             )
         }
@@ -61,6 +63,7 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
     private func startOnQueue(
         languageIDs: [String],
         onTranscript: @escaping @Sendable (String, String) -> Void,
+        onSilence: @escaping @Sendable () -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
         stopOnQueue()
@@ -71,19 +74,14 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
             return
         }
 
-        guard let languageID = languageIDs.first,
-              let recognizer = SFSpeechRecognizer(locale: Locale(identifier: languageID)) else {
-            onUnavailable("Speech recognizer is unavailable for the selected local language.")
-            return
+        let recognizers = languageIDs.compactMap { languageID -> (String, SFSpeechRecognizer)? in
+            guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: languageID)),
+                  recognizer.supportsOnDeviceRecognition,
+                  recognizer.isAvailable else { return nil }
+            return (languageID, recognizer)
         }
-
-        guard recognizer.supportsOnDeviceRecognition else {
-            onUnavailable("On-device Speech Recognition is not available for \(languageID) on this Mac. Recording will continue normally.")
-            return
-        }
-
-        guard recognizer.isAvailable else {
-            onUnavailable("On-device Speech Recognition is unavailable right now. Recording will continue normally.")
+        guard recognizers.isEmpty == false else {
+            onUnavailable("On-device Speech Recognition is unavailable for the selected meeting languages.")
             return
         }
 
@@ -95,46 +93,64 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
             return
         }
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        if #available(macOS 13.0, *) {
-            request.requiresOnDeviceRecognition = true
-        }
-        if #available(macOS 14.0, *) {
-            request.addsPunctuation = true
-        }
-
-        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            if let result {
-                let transcript = result.bestTranscription.formattedString
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if transcript.isEmpty == false {
-                    onTranscript(transcript, languageID)
-                }
+        for (languageID, recognizer) in recognizers {
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            request.shouldReportPartialResults = true
+            if #available(macOS 13.0, *) {
+                request.requiresOnDeviceRecognition = true
+            }
+            if #available(macOS 14.0, *) {
+                request.addsPunctuation = true
             }
 
-            if let error {
-                if self?.isStoppingIntentionally != true {
-                    onUnavailable("Realtime transcription stopped: \(error.localizedDescription)")
+            let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+                if let result {
+                    let transcript = result.bestTranscription.formattedString
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if transcript.isEmpty == false {
+                        onTranscript(transcript, languageID)
+                    }
                 }
-                self?.stop()
+
+                if let error {
+                    if self?.isStoppingIntentionally != true {
+                        onUnavailable("Realtime \(languageID) transcription stopped: \(error.localizedDescription)")
+                    }
+                }
             }
+            recognitionRequests.append(request)
+            recognitionTasks.append(task)
         }
 
-        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-            request.append(buffer)
+        var quietDuration: TimeInterval = 0
+        let bufferDuration = Double(1_024) / format.sampleRate
+        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak self] buffer, _ in
+            guard let transcriber = self else { return }
+            transcriber.queue.async { [weak transcriber] in
+                transcriber?.recognitionRequests.forEach { $0.append(buffer) }
+            }
+            let level = AudioMeterCalculator.audioLevel(from: buffer)
+            if level < 0.075 {
+                quietDuration += bufferDuration
+                if quietDuration >= 1.5 {
+                    quietDuration = 0
+                    onSilence()
+                }
+            } else {
+                quietDuration = 0
+            }
         }
 
         do {
             engine.prepare()
             try engine.start()
             audioEngine = engine
-            recognitionRequest = request
             isStoppingIntentionally = false
         } catch {
             inputNode.removeTap(onBus: 0)
-            recognitionTask?.cancel()
-            recognitionTask = nil
+            recognitionTasks.forEach { $0.cancel() }
+            recognitionTasks = []
+            recognitionRequests = []
             onUnavailable("Realtime transcription could not start: \(error.localizedDescription)")
         }
     }
@@ -145,11 +161,286 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
         }
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
-        recognitionTask?.cancel()
-        recognitionTask = nil
+        recognitionRequests.forEach { $0.endAudio() }
+        recognitionRequests = []
+        recognitionTasks.forEach { $0.cancel() }
+        recognitionTasks = []
         audioEngine = nil
+    }
+}
+
+private final class AliyunParaformerTranscriber: @unchecked Sendable {
+    private final class ConverterInputState: @unchecked Sendable {
+        var didProvideInput = false
+    }
+
+    private let queue = DispatchQueue(label: "PowerMeetings.AliyunParaformerTranscriber")
+    private let urlSession = URLSession(configuration: .default)
+    private var audioEngine: AVAudioEngine?
+    private var webSocketTask: URLSessionWebSocketTask?
+    private var taskID = UUID().uuidString
+    private var isTaskStarted = false
+    private var pendingAudioChunks: [Data] = []
+    private var converter: AVAudioConverter?
+    private var outputFormat: AVAudioFormat?
+    private var isStoppingIntentionally = false
+
+    func start(
+        configuration: ModelConfiguration,
+        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
+        onStatus: @escaping @Sendable (String) -> Void,
+        onUnavailable: @escaping @Sendable (String) -> Void
+    ) {
+        queue.async { [weak self] in
+            self?.startOnQueue(
+                configuration: configuration,
+                onTranscript: onTranscript,
+                onStatus: onStatus,
+                onUnavailable: onUnavailable
+            )
+        }
+    }
+
+    func stop() {
+        queue.async { [weak self] in
+            self?.stopOnQueue()
+        }
+    }
+
+    private func startOnQueue(
+        configuration: ModelConfiguration,
+        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
+        onStatus: @escaping @Sendable (String) -> Void,
+        onUnavailable: @escaping @Sendable (String) -> Void
+    ) {
+        stopOnQueue()
+        let apiKey = configuration.realtimeASRAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard apiKey.isEmpty == false else {
+            onUnavailable("Aliyun Realtime ASR is not configured. Falling back to macOS Speech.")
+            return
+        }
+
+        taskID = UUID().uuidString
+        isTaskStarted = false
+        isStoppingIntentionally = false
+        pendingAudioChunks = []
+
+        var request = URLRequest(url: URL(string: "wss://dashscope.aliyuncs.com/api-ws/v1/inference")!)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("PowerMeetings/0.1.0", forHTTPHeaderField: "user-agent")
+        onStatus("Aliyun Realtime ASR: connecting to DashScope WebSocket...")
+        let socket = urlSession.webSocketTask(with: request)
+        webSocketTask = socket
+        socket.resume()
+        receiveLoop(onTranscript: onTranscript, onStatus: onStatus, onUnavailable: onUnavailable)
+        let model = configuration.realtimeASRModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "fun-asr-realtime"
+            : configuration.realtimeASRModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sampleRate = model.contains("8k") ? 8_000 : 16_000
+        sendRunTask(model: model, sampleRate: sampleRate)
+        startAudioEngine(sampleRate: Double(sampleRate), onUnavailable: onUnavailable)
+    }
+
+    private func sendRunTask(model: String, sampleRate: Int) {
+        var parameters: [String: Any] = [
+            "format": "pcm",
+            "sample_rate": sampleRate,
+            "disfluency_removal_enabled": false,
+            "semantic_punctuation_enabled": false,
+            "punctuation_prediction_enabled": true,
+            "max_sentence_silence": 1500,
+            "heartbeat": true
+        ]
+        if model == "paraformer-realtime-v2" || model.hasPrefix("fun-asr-realtime") {
+            parameters["language_hints"] = ["zh", "en"]
+        }
+
+        let message: [String: Any] = [
+            "header": [
+                "action": "run-task",
+                "task_id": taskID,
+                "streaming": "duplex"
+            ],
+            "payload": [
+                "task_group": "audio",
+                "task": "asr",
+                "function": "recognition",
+                "model": model,
+                "parameters": parameters,
+                "input": [:]
+            ]
+        ]
+        sendJSON(message)
+    }
+
+    private func startAudioEngine(sampleRate: Double, onUnavailable: @escaping @Sendable (String) -> Void) {
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
+              let targetFormat = AVAudioFormat(
+                commonFormat: .pcmFormatInt16,
+                sampleRate: sampleRate,
+                channels: 1,
+                interleaved: true
+              ),
+              let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            onUnavailable("Aliyun Realtime ASR could not prepare microphone audio format.")
+            return
+        }
+
+        self.converter = converter
+        outputFormat = targetFormat
+        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] buffer, _ in
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                self?.sendAudioBuffer(buffer)
+            }
+        }
+
+        do {
+            engine.prepare()
+            try engine.start()
+            audioEngine = engine
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            onUnavailable("Aliyun Realtime ASR audio capture failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func sendAudioBuffer(_ buffer: AVAudioPCMBuffer) {
+        guard let data = convertToPCM8k(buffer) else { return }
+        if isTaskStarted {
+            webSocketTask?.send(.data(data)) { _ in }
+        } else {
+            pendingAudioChunks.append(data)
+        }
+    }
+
+    private func convertToPCM8k(_ buffer: AVAudioPCMBuffer) -> Data? {
+        guard let converter, let outputFormat else { return nil }
+        let ratio = outputFormat.sampleRate / buffer.format.sampleRate
+        let frameCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCapacity) else { return nil }
+
+        let inputState = ConverterInputState()
+        var error: NSError?
+        converter.convert(to: outputBuffer, error: &error) { _, status in
+            if inputState.didProvideInput {
+                status.pointee = .noDataNow
+                return nil
+            }
+            inputState.didProvideInput = true
+            status.pointee = .haveData
+            return buffer
+        }
+        guard error == nil,
+              let data = outputBuffer.int16ChannelData,
+              outputBuffer.frameLength > 0 else { return nil }
+        return Data(bytes: data[0], count: Int(outputBuffer.frameLength) * MemoryLayout<Int16>.size)
+    }
+
+    private func receiveLoop(
+        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
+        onStatus: @escaping @Sendable (String) -> Void,
+        onUnavailable: @escaping @Sendable (String) -> Void
+    ) {
+        webSocketTask?.receive { [weak self] result in
+            guard let self else { return }
+            self.queue.async {
+                switch result {
+                case let .success(message):
+                    self.handle(message, onTranscript: onTranscript, onStatus: onStatus, onUnavailable: onUnavailable)
+                    self.receiveLoop(onTranscript: onTranscript, onStatus: onStatus, onUnavailable: onUnavailable)
+                case let .failure(error):
+                    if self.isStoppingIntentionally == false {
+                        onUnavailable("Aliyun Realtime ASR connection failed: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func handle(
+        _ message: URLSessionWebSocketTask.Message,
+        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
+        onStatus: @escaping @Sendable (String) -> Void,
+        onUnavailable: @escaping @Sendable (String) -> Void
+    ) {
+        let data: Data?
+        switch message {
+        case let .string(text):
+            data = text.data(using: .utf8)
+        case let .data(messageData):
+            data = messageData
+        @unknown default:
+            data = nil
+        }
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let header = object["header"] as? [String: Any],
+              let event = header["event"] as? String else { return }
+
+        switch event {
+        case "task-started":
+            isTaskStarted = true
+            onStatus("Aliyun Realtime ASR: task started.")
+            pendingAudioChunks.forEach { chunk in
+                webSocketTask?.send(.data(chunk)) { _ in }
+            }
+            pendingAudioChunks = []
+        case "task-finished":
+            onStatus("Aliyun Realtime ASR: task finished.")
+        case "result-generated":
+            guard let payload = object["payload"] as? [String: Any],
+                  let output = payload["output"] as? [String: Any],
+                  let sentence = output["sentence"] as? [String: Any],
+                  (sentence["heartbeat"] as? Bool) != true,
+                  let text = sentence["text"] as? String else { return }
+            let isFinal = sentence["sentence_end"] as? Bool ?? false
+            onTranscript(text, inferredLanguageID(for: text), isFinal)
+        case "task-failed":
+            let message = header["error_message"] as? String ?? "Unknown Paraformer task failure."
+            isStoppingIntentionally = true
+            onUnavailable("Aliyun Realtime ASR failed: \(message)")
+        default:
+            break
+        }
+    }
+
+    private func sendJSON(_ object: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let text = String(data: data, encoding: .utf8) else { return }
+        webSocketTask?.send(.string(text)) { _ in }
+    }
+
+    private func inferredLanguageID(for text: String) -> String {
+        let cjkCount = text.unicodeScalars.filter { (0x4E00...0x9FFF).contains(Int($0.value)) }.count
+        let latinCount = text.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) && (0x0000...0x024F).contains(Int($0.value)) }.count
+        return cjkCount > latinCount ? LocalMeetingLanguage.mandarinChinese.rawValue : LocalMeetingLanguage.english.rawValue
+    }
+
+    private func stopOnQueue() {
+        isStoppingIntentionally = true
+        if let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        sendJSON([
+            "header": [
+                "action": "finish-task",
+                "task_id": taskID,
+                "streaming": "duplex"
+            ],
+            "payload": ["input": [:]]
+        ])
+        webSocketTask?.cancel(with: .normalClosure, reason: nil)
+        webSocketTask = nil
+        audioEngine = nil
+        converter = nil
+        outputFormat = nil
+        pendingAudioChunks = []
+        isTaskStarted = false
     }
 }
 
@@ -719,10 +1010,18 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
     }
 }
 
+struct LiveTranscriptDraft: Identifiable, Hashable {
+    var id: String { "\(meetingID.uuidString)-\(languageID)" }
+    var meetingID: UUID
+    var languageID: String
+    var text: String
+}
+
 @MainActor
 final class MeetingSessionViewModel: ObservableObject {
     @Published var draftQuestion = ""
     @Published var activeSuggestion = "Start recording and I will surface likely questions, objections, and useful reply angles here."
+    @Published private(set) var liveDraft: LiveTranscriptDraft?
 
     private let demoLines: [(String, String, String, SegmentKind)] = [
         (
@@ -750,16 +1049,24 @@ final class MeetingSessionViewModel: ObservableObject {
     private var activeMeetingID: UUID?
     private var appendSegment: (@MainActor (TranscriptSegment) -> Void)?
     private var updateSegmentTranslation: (@MainActor (TranscriptSegment.ID, String) -> Void)?
+    private var updateSegment: (@MainActor (TranscriptSegment.ID, String, String, String) -> Void)?
     private var speechTranscriber: LiveSpeechTranscriber?
+    private var paraformerTranscriber: AliyunParaformerTranscriber?
     private var lastEmittedTranscripts: [String: String] = [:]
     private var pendingLiveTranscripts: [String: String] = [:]
     private var pendingLiveTranscriptTimers: [String: Timer] = [:]
+    private var lastFinalizedTranscripts: [String: String] = [:]
+    private var activeLiveLanguageID: String?
+    private var lastCommittedSegmentID: TranscriptSegment.ID?
+    private var lastCommittedTranscript = ""
+    private var lastCommittedAt: Date?
     private var modelConfiguration = ModelConfiguration()
 
     func startLiveTranscription(
         for meetingID: UUID,
         configuration: ModelConfiguration,
         append: @escaping @MainActor (TranscriptSegment) -> Void,
+        updateSegment: @escaping @MainActor (TranscriptSegment.ID, String, String, String) -> Void,
         updateTranslation: @escaping @MainActor (TranscriptSegment.ID, String) -> Void
     ) {
         stopDemoTranscript()
@@ -767,6 +1074,7 @@ final class MeetingSessionViewModel: ObservableObject {
         demoIndex = 0
         activeMeetingID = meetingID
         appendSegment = append
+        self.updateSegment = updateSegment
         updateSegmentTranslation = updateTranslation
         startSpeechRecognition()
     }
@@ -810,18 +1118,69 @@ final class MeetingSessionViewModel: ObservableObject {
         transcriptTimer = nil
         activeMeetingID = nil
         appendSegment = nil
+        updateSegment = nil
         updateSegmentTranslation = nil
     }
 
     private func startSpeechRecognition() {
+        guard speechTranscriber == nil, paraformerTranscriber == nil else { return }
+        if isAliyunRealtimeASREnabled,
+           modelConfiguration.realtimeASRAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            startParaformerRecognition()
+            return
+        }
+        startMacOSSpeechRecognition()
+    }
+
+    private var isAliyunRealtimeASREnabled: Bool {
+        modelConfiguration.realtimeASRProvider == RealtimeASRProvider.aliyunRealtimeASR.rawValue
+            || modelConfiguration.realtimeASRProvider == "Aliyun Paraformer"
+    }
+
+    private func startParaformerRecognition() {
+        let transcriber = AliyunParaformerTranscriber()
+        paraformerTranscriber = transcriber
+        transcriber.start(
+            configuration: modelConfiguration,
+            onTranscript: { [weak self] transcript, languageID, isFinal in
+                Task { @MainActor in
+                    self?.emitTranscriptIfNeeded(transcript, languageID: languageID, isFinal: isFinal)
+                }
+            },
+            onStatus: { [weak self] status in
+                Task { @MainActor in
+                    self?.appendSpeechUnavailableSegment(reason: status)
+                }
+            },
+            onUnavailable: { [weak self] reason in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.paraformerTranscriber?.stop()
+                    self.paraformerTranscriber = nil
+                    self.appendSpeechUnavailableSegment(reason: reason)
+                    if SpeechAuthorizationBridge.currentStatus == .authorized {
+                        self.startMacOSSpeechRecognition()
+                    }
+                }
+            }
+        )
+    }
+
+    private func startMacOSSpeechRecognition() {
         guard speechTranscriber == nil else { return }
         let transcriber = LiveSpeechTranscriber()
         speechTranscriber = transcriber
+        let languageIDs = liveRecognitionLanguageIDs(localLanguage: modelConfiguration.localLanguage)
         transcriber.start(
-            languageIDs: [modelConfiguration.localLanguage],
+            languageIDs: languageIDs,
             onTranscript: { [weak self] transcript, languageID in
                 Task { @MainActor in
-                    self?.emitTranscriptIfNeeded(transcript, languageID: languageID)
+                    self?.emitTranscriptIfNeeded(transcript, languageID: languageID, isFinal: false)
+                }
+            },
+            onSilence: { [weak self] in
+                Task { @MainActor in
+                    self?.flushAllPendingTranscripts()
                 }
             },
             onUnavailable: { [weak self] reason in
@@ -832,47 +1191,44 @@ final class MeetingSessionViewModel: ObservableObject {
         )
     }
 
-    private func emitTranscriptIfNeeded(_ transcript: String, languageID: String) {
+    private func emitTranscriptIfNeeded(_ transcript: String, languageID: String, isFinal: Bool) {
         let cleanTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         let lastEmittedTranscript = lastEmittedTranscripts[languageID] ?? ""
         guard cleanTranscript != lastEmittedTranscript,
+              cleanTranscript != lastFinalizedTranscripts[languageID],
               appendSegment != nil else { return }
-
-        let delta: String
-        if cleanTranscript.hasPrefix(lastEmittedTranscript) {
-            delta = String(cleanTranscript.dropFirst(lastEmittedTranscript.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            delta = cleanTranscript
-        }
-        guard delta.count >= 2 else { return }
+        guard cleanTranscript.count >= 2 else { return }
+        guard shouldAcceptTranscript(cleanTranscript, languageID: languageID) else { return }
         lastEmittedTranscripts[languageID] = cleanTranscript
 
-        appendPendingTranscript(delta, languageID: languageID)
-        if shouldFlushTranscript(delta: delta, languageID: languageID) {
+        updatePendingTranscript(cleanTranscript, languageID: languageID)
+        if isFinal || shouldFlushTranscript(text: cleanTranscript, languageID: languageID) {
             flushPendingTranscript(languageID: languageID)
         } else {
             schedulePendingTranscriptFlush(languageID: languageID)
         }
     }
 
-    private func appendPendingTranscript(_ delta: String, languageID: String) {
-        let existing = pendingLiveTranscripts[languageID] ?? ""
-        pendingLiveTranscripts[languageID] = joinedTranscript(existing, delta)
+    private func updatePendingTranscript(_ transcript: String, languageID: String) {
+        if activeLiveLanguageID != languageID {
+            clearPendingTranscripts(except: languageID)
+            activeLiveLanguageID = languageID
+        }
+        pendingLiveTranscripts[languageID] = transcript
+        updateLiveDraft(languageID: languageID)
     }
 
     private func schedulePendingTranscriptFlush(languageID: String) {
         pendingLiveTranscriptTimers[languageID]?.invalidate()
-        pendingLiveTranscriptTimers[languageID] = Timer.scheduledTimer(withTimeInterval: 1.05, repeats: false) { [weak self] _ in
+        pendingLiveTranscriptTimers[languageID] = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.flushPendingTranscript(languageID: languageID)
             }
         }
     }
 
-    private func shouldFlushTranscript(delta: String, languageID: String) -> Bool {
-        let pending = pendingLiveTranscripts[languageID] ?? ""
-        if pending.count >= 42 { return true }
-        guard let last = delta.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
+    private func shouldFlushTranscript(text: String, languageID: String) -> Bool {
+        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
         return "。！？?!.;；".contains(last)
     }
 
@@ -882,9 +1238,15 @@ final class MeetingSessionViewModel: ObservableObject {
 
         let delta = (pendingLiveTranscripts[languageID] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         pendingLiveTranscripts[languageID] = nil
+        clearLiveDraft(languageID: languageID)
+        if activeLiveLanguageID == languageID {
+            activeLiveLanguageID = nil
+        }
         guard delta.isEmpty == false,
+              delta != lastFinalizedTranscripts[languageID],
               let activeMeetingID,
               let appendSegment else { return }
+        lastFinalizedTranscripts[languageID] = delta
 
         let timestamp = TimeInterval(demoIndex * 8)
         demoIndex += 1
@@ -893,56 +1255,184 @@ final class MeetingSessionViewModel: ObservableObject {
             && modelConfiguration.translationModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         let shouldTranslate = languageID != localLanguage && hasTranslationConfiguration
 
+        if shouldReviseLastCommittedTranscript(with: delta),
+           let lastCommittedSegmentID,
+           let updateSegment {
+            let speaker = "Speaker · \(languageLabel(for: languageID))"
+            updateSegment(lastCommittedSegmentID, delta, delta, speaker)
+            lastCommittedTranscript = delta
+            lastCommittedAt = Date()
+            translateCommittedSegmentIfNeeded(
+                segmentID: lastCommittedSegmentID,
+                text: delta,
+                languageID: languageID,
+                shouldTranslate: shouldTranslate,
+                localLanguage: localLanguage
+            )
+            return
+        }
+
         let segment = TranscriptSegment(
             meetingID: activeMeetingID,
             timestamp: timestamp,
             speaker: "Speaker · \(languageLabel(for: languageID))",
             sourceText: delta,
             translatedText: delta,
-            kind: delta.contains("?") || delta.contains("？") ? .question : .transcript,
+            kind: .transcript,
             confidence: 0.82
         )
         appendSegment(segment)
+        lastCommittedSegmentID = segment.id
+        lastCommittedTranscript = delta
+        lastCommittedAt = Date()
 
+        translateCommittedSegmentIfNeeded(
+            segmentID: segment.id,
+            text: delta,
+            languageID: languageID,
+            shouldTranslate: shouldTranslate,
+            localLanguage: localLanguage
+        )
+    }
+
+    private func translateCommittedSegmentIfNeeded(
+        segmentID: TranscriptSegment.ID,
+        text: String,
+        languageID: String,
+        shouldTranslate: Bool,
+        localLanguage: String
+    ) {
         guard shouldTranslate, let updateSegmentTranslation else { return }
         Task {
             guard let translated = try? await MeetingAIClient().translateText(
-                delta,
+                text,
                 targetLanguage: LocalMeetingLanguage(rawValue: localLanguage)?.translationTarget ?? "Chinese (Mandarin, Simplified Chinese)",
                 configuration: modelConfiguration
             ),
                   translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
-                  translated != delta else { return }
+                  translated != text else { return }
 
             await MainActor.run {
-                updateSegmentTranslation(segment.id, translated)
+                updateSegmentTranslation(segmentID, translated)
             }
         }
     }
 
+    private func shouldReviseLastCommittedTranscript(with transcript: String) -> Bool {
+        guard let lastCommittedAt,
+              Date().timeIntervalSince(lastCommittedAt) < 12,
+              lastCommittedTranscript.isEmpty == false else { return false }
+        let normalizedNew = normalizedTranscriptForOverlap(transcript)
+        let normalizedLast = normalizedTranscriptForOverlap(lastCommittedTranscript)
+        guard normalizedNew != normalizedLast else { return true }
+        return normalizedNew.contains(normalizedLast)
+            || normalizedLast.contains(normalizedNew)
+            || overlapRatio(normalizedNew, normalizedLast) >= 0.62
+    }
+
+    private func normalizedTranscriptForOverlap(_ text: String) -> String {
+        text.lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+    }
+
+    private func overlapRatio(_ lhs: String, _ rhs: String) -> Double {
+        guard lhs.isEmpty == false, rhs.isEmpty == false else { return 0 }
+        let shorter = lhs.count <= rhs.count ? lhs : rhs
+        let longer = lhs.count > rhs.count ? lhs : rhs
+        var best = 0
+        let shorterChars = Array(shorter)
+        let longerChars = Array(longer)
+        for start in longerChars.indices {
+            var length = 0
+            while length < shorterChars.count,
+                  start + length < longerChars.count,
+                  shorterChars[length] == longerChars[start + length] {
+                length += 1
+            }
+            best = max(best, length)
+        }
+        return Double(best) / Double(shorter.count)
+    }
+
     private func flushAllPendingTranscripts() {
-        for languageID in pendingLiveTranscripts.keys {
+        for languageID in Array(pendingLiveTranscripts.keys) {
             flushPendingTranscript(languageID: languageID)
         }
     }
 
-    private func joinedTranscript(_ current: String, _ delta: String) -> String {
-        let trimmedCurrent = current.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedDelta = delta.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedCurrent.isEmpty == false else { return trimmedDelta }
-        guard trimmedDelta.isEmpty == false else { return trimmedCurrent }
-
-        let currentEndsWithSpace = trimmedCurrent.last?.isWhitespace == true
-        let deltaStartsWithPunctuation = ",，.。!！?？;；:：".contains(trimmedDelta.first ?? " ")
-        let shouldInsertSpace = currentEndsWithSpace == false
-            && deltaStartsWithPunctuation == false
-            && containsLatinText(trimmedCurrent)
-            && containsLatinText(trimmedDelta)
-        return shouldInsertSpace ? "\(trimmedCurrent) \(trimmedDelta)" : "\(trimmedCurrent)\(trimmedDelta)"
+    private func updateLiveDraft(languageID: String) {
+        let text = (pendingLiveTranscripts[languageID] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.isEmpty == false, let activeMeetingID else {
+            clearLiveDraft(languageID: languageID)
+            return
+        }
+        liveDraft = LiveTranscriptDraft(
+            meetingID: activeMeetingID,
+            languageID: languageID,
+            text: text
+        )
     }
 
-    private func containsLatinText(_ text: String) -> Bool {
-        text.range(of: #"[A-Za-z0-9]"#, options: .regularExpression) != nil
+    private func clearLiveDraft(languageID: String? = nil) {
+        guard let languageID else {
+            liveDraft = nil
+            return
+        }
+        if liveDraft?.languageID == languageID {
+            liveDraft = nil
+        }
+    }
+
+    private func clearPendingTranscripts(except languageID: String) {
+        for key in Array(pendingLiveTranscripts.keys) where key != languageID {
+            pendingLiveTranscripts[key] = nil
+            pendingLiveTranscriptTimers[key]?.invalidate()
+            pendingLiveTranscriptTimers[key] = nil
+        }
+        if liveDraft?.languageID != languageID {
+            liveDraft = nil
+        }
+    }
+
+    private func shouldAcceptTranscript(_ transcript: String, languageID: String) -> Bool {
+        let candidateScore = languageConfidenceScore(transcript, languageID: languageID)
+        guard candidateScore >= 0.45 else { return false }
+        guard let activeLiveLanguageID else { return true }
+        if activeLiveLanguageID == languageID { return true }
+
+        let activeText = pendingLiveTranscripts[activeLiveLanguageID] ?? ""
+        let activeScore = languageConfidenceScore(activeText, languageID: activeLiveLanguageID)
+        return candidateScore >= activeScore + 0.18
+            || transcript.count >= max(activeText.count + 10, 18)
+    }
+
+    private func liveRecognitionLanguageIDs(localLanguage: String) -> [String] {
+        let alternatives = LocalMeetingLanguage.allCases
+            .map(\.rawValue)
+            .filter { $0 != localLanguage }
+        return [localLanguage] + alternatives
+    }
+
+    private func languageConfidenceScore(_ transcript: String, languageID: String) -> Double {
+        let scalars = transcript.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+        guard scalars.isEmpty == false else { return 0 }
+
+        let cjkCount = scalars.filter { scalar in
+            (0x4E00...0x9FFF).contains(Int(scalar.value))
+        }.count
+        let latinCount = scalars.filter { scalar in
+            CharacterSet.alphanumerics.contains(scalar)
+                && (0x0000...0x024F).contains(Int(scalar.value))
+        }.count
+
+        switch languageID {
+        case LocalMeetingLanguage.mandarinChinese.rawValue:
+            return Double(cjkCount) / Double(scalars.count)
+        case LocalMeetingLanguage.english.rawValue:
+            return Double(latinCount) / Double(scalars.count)
+        default:
+            return 0.5
+        }
     }
 
     private func appendSpeechUnavailableSegment(reason: String) {
@@ -966,9 +1456,17 @@ final class MeetingSessionViewModel: ObservableObject {
         pendingLiveTranscriptTimers = [:]
         speechTranscriber?.stop()
         speechTranscriber = nil
+        paraformerTranscriber?.stop()
+        paraformerTranscriber = nil
         if keepSession == false {
             lastEmittedTranscripts = [:]
             pendingLiveTranscripts = [:]
+            lastFinalizedTranscripts = [:]
+            activeLiveLanguageID = nil
+            lastCommittedSegmentID = nil
+            lastCommittedTranscript = ""
+            lastCommittedAt = nil
+            clearLiveDraft()
         }
     }
 

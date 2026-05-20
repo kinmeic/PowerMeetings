@@ -101,6 +101,13 @@ enum ModelProvider: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum RealtimeASRProvider: String, CaseIterable, Identifiable, Codable {
+    case macOSSpeech = "macOS Speech"
+    case aliyunRealtimeASR = "Aliyun Realtime ASR"
+
+    var id: String { rawValue }
+}
+
 enum LocalMeetingLanguage: String, CaseIterable, Identifiable, Codable {
     case mandarinChinese = "zh-CN"
     case english = "en-US"
@@ -130,6 +137,9 @@ struct ModelConfiguration: Hashable, Codable {
     var provider: String = ModelProvider.openAI.rawValue
     var apiBaseURL = "https://api.openai.com/v1"
     var apiKey = ""
+    var realtimeASRProvider = RealtimeASRProvider.macOSSpeech.rawValue
+    var realtimeASRAPIKey = ""
+    var realtimeASRModel = "fun-asr-realtime"
     var realtimeModel = "gpt-4o-realtime-preview"
     var translationModel = "gpt-4.1-mini"
     var summaryModel = "gpt-4.1-mini"

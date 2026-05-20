@@ -20,6 +20,9 @@ struct SettingsView: View {
     @State private var provider = ModelProvider.openAI.rawValue
     @State private var apiBaseURL = ""
     @State private var apiKey = ""
+    @State private var realtimeASRProvider = RealtimeASRProvider.macOSSpeech.rawValue
+    @State private var realtimeASRAPIKey = ""
+    @State private var realtimeASRModel = ""
     @State private var translationModel = ""
     @State private var summaryModel = ""
     @State private var localLanguage = LocalMeetingLanguage.mandarinChinese.rawValue
@@ -106,29 +109,31 @@ struct SettingsView: View {
                     audioDeviceManager.refreshDevices()
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("macOS Speech")
-                        Spacer()
-                        Text(speechAuthorizationLabel)
-                            .font(.caption.bold())
-                            .foregroundStyle(speechAuthorizationColor)
-                        Button(speechAuthorizationButtonTitle) {
-                            Task {
-                                await requestSpeechAuthorization()
+                if realtimeASRProvider == RealtimeASRProvider.macOSSpeech.rawValue {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("macOS Speech")
+                            Spacer()
+                            Text(speechAuthorizationLabel)
+                                .font(.caption.bold())
+                                .foregroundStyle(speechAuthorizationColor)
+                            Button(speechAuthorizationButtonTitle) {
+                                Task {
+                                    await requestSpeechAuthorization()
+                                }
                             }
+                            .buttonStyle(.bordered)
+                            .disabled(speechAuthorizationStatus == .authorized || isRequestingSpeechAuthorization)
+                            Button("Refresh") {
+                                refreshSpeechAuthorizationStatus()
+                            }
+                            .buttonStyle(.borderless)
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(speechAuthorizationStatus == .authorized || isRequestingSpeechAuthorization)
-                        Button("Refresh") {
-                            refreshSpeechAuthorizationStatus()
+                        if speechAuthorizationMessage.isEmpty == false {
+                            Text(speechAuthorizationMessage)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.borderless)
-                    }
-                    if speechAuthorizationMessage.isEmpty == false {
-                        Text(speechAuthorizationMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -152,15 +157,28 @@ struct SettingsView: View {
 
     private var realtimeModelSettings: some View {
         Form {
-            Section("Realtime") {
-                Picker("Provider", selection: $provider) {
+            Section("ASR Provider") {
+                Picker("Realtime ASR", selection: $realtimeASRProvider) {
+                    ForEach(RealtimeASRProvider.allCases) { provider in
+                        Text(provider.rawValue).tag(provider.rawValue)
+                    }
+                }
+                TextField("ASR Model", text: $realtimeASRModel)
+                SecureField("ASR API Key", text: $realtimeASRAPIKey)
+                Text("Recommended for meetings: `fun-asr-realtime` with 16 kHz PCM. Use `paraformer-realtime-8k-v2` only for 8 kHz telephone-style Chinese audio.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Text Model Provider") {
+                Picker("LLM Provider", selection: $provider) {
                     ForEach(ModelProvider.allCases) { provider in
                         Text(provider.rawValue).tag(provider.rawValue)
                     }
                 }
 
                 TextField("API Base URL", text: $apiBaseURL)
-                SecureField("API Key", text: $apiKey)
+                SecureField("LLM API Key", text: $apiKey)
                 Picker("Local Language", selection: $localLanguage) {
                     ForEach(LocalMeetingLanguage.allCases) { language in
                         Text(language.label).tag(language.rawValue)
@@ -168,7 +186,7 @@ struct SettingsView: View {
                 }
                 TextField("Translation Model", text: $translationModel)
                 TextField("Summary Model", text: $summaryModel)
-                Text("Live transcription uses macOS Speech locally when Speech Recognition is authorized. The model provider is only used for realtime translation and meeting summaries.")
+                Text("Used for realtime translation and meeting summaries. Alibaba Cloud Bailian is OpenAI-compatible; use `https://dashscope.aliyuncs.com/compatible-mode/v1` with models such as `qwen-mt-turbo`.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -238,6 +256,9 @@ struct SettingsView: View {
         provider = modelSettings.provider
         apiBaseURL = modelSettings.apiBaseURL
         apiKey = modelSettings.apiKey
+        realtimeASRProvider = modelSettings.realtimeASRProvider
+        realtimeASRAPIKey = modelSettings.realtimeASRAPIKey
+        realtimeASRModel = modelSettings.realtimeASRModel
         translationModel = modelSettings.translationModel
         summaryModel = modelSettings.summaryModel
         localLanguage = modelSettings.localLanguage
@@ -354,6 +375,9 @@ struct SettingsView: View {
         modelSettings.provider = provider
         modelSettings.apiBaseURL = apiBaseURL
         modelSettings.apiKey = apiKey
+        modelSettings.realtimeASRProvider = realtimeASRProvider
+        modelSettings.realtimeASRAPIKey = realtimeASRAPIKey
+        modelSettings.realtimeASRModel = realtimeASRModel
         modelSettings.translationModel = translationModel
         modelSettings.summaryModel = summaryModel
         modelSettings.localLanguage = localLanguage

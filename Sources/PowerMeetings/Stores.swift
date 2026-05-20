@@ -168,6 +168,12 @@ final class MeetingStore: ObservableObject {
         save()
     }
 
+    func updateSegment(id: TranscriptSegment.ID, _ update: (inout TranscriptSegment) -> Void) {
+        guard let index = segments.firstIndex(where: { $0.id == id }) else { return }
+        update(&segments[index])
+        save()
+    }
+
     func agentMessages(for meetingID: Meeting.ID) -> [AgentMessage] {
         agentMessagesByMeeting[meetingID] ?? defaultAgentMessages()
     }
@@ -289,6 +295,9 @@ final class ModelSettingsStore: ObservableObject {
     @AppStorage("model.provider") var provider = ModelProvider.openAI.rawValue
     @AppStorage("model.apiBaseURL") var apiBaseURL = "https://api.openai.com/v1"
     @AppStorage("model.apiKey") var apiKey = ""
+    @AppStorage("realtimeASR.provider") var realtimeASRProvider = RealtimeASRProvider.macOSSpeech.rawValue
+    @AppStorage("realtimeASR.apiKey") var realtimeASRAPIKey = ""
+    @AppStorage("realtimeASR.model") var realtimeASRModel = "fun-asr-realtime"
     @AppStorage("model.realtimeModel") var realtimeModel = "gpt-4o-realtime-preview"
     @AppStorage("model.translationModel") var translationModel = "gpt-4.1-mini"
     @AppStorage("model.summaryModel") var summaryModel = "gpt-4.1-mini"
@@ -305,6 +314,9 @@ final class ModelSettingsStore: ObservableObject {
             provider: provider,
             apiBaseURL: apiBaseURL,
             apiKey: apiKey,
+            realtimeASRProvider: realtimeASRProvider,
+            realtimeASRAPIKey: realtimeASRAPIKey,
+            realtimeASRModel: realtimeASRModel,
             realtimeModel: realtimeModel,
             translationModel: translationModel,
             summaryModel: summaryModel,

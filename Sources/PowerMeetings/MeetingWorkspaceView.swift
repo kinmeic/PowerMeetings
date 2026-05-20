@@ -46,6 +46,7 @@ struct MeetingWorkspaceView: View {
                     TranscriptTimelineView(
                         meeting: meeting,
                         segments: meetingStore.selectedMeetingSegments,
+                        liveDraft: session.liveDraft,
                         modelConfiguration: modelSettings.configuration,
                         isTranscribingRecording: isTranscribingRecording,
                         onTranscribeRecording: { transcribeRecording(meeting: meeting) }
@@ -78,6 +79,13 @@ struct MeetingWorkspaceView: View {
             configuration: modelSettings.configuration,
             append: { segment in
                 meetingStore.appendSegment(segment)
+            },
+            updateSegment: { id, sourceText, translatedText, speaker in
+                meetingStore.updateSegment(id: id) {
+                    $0.sourceText = sourceText
+                    $0.translatedText = translatedText
+                    $0.speaker = speaker
+                }
             },
             updateTranslation: { id, translatedText in
                 meetingStore.updateSegmentTranslation(id: id, translatedText: translatedText)
@@ -481,6 +489,7 @@ private struct LevelMeter: View {
 private struct TranscriptTimelineView: View {
     let meeting: Meeting
     let segments: [TranscriptSegment]
+    let liveDraft: LiveTranscriptDraft?
     let modelConfiguration: ModelConfiguration
     let isTranscribingRecording: Bool
     let onTranscribeRecording: () -> Void
@@ -515,7 +524,7 @@ private struct TranscriptTimelineView: View {
 
             ScrollView {
                 LazyVStack(spacing: 14) {
-                    if segments.isEmpty {
+                    if segments.isEmpty && visibleLiveDraft == nil {
                         ContentUnavailableView(
                             "Ready for live transcription",
                             systemImage: "waveform.and.mic",
@@ -527,10 +536,19 @@ private struct TranscriptTimelineView: View {
                     ForEach(segments) { segment in
                         TranscriptSegmentView(segment: segment, isModelConfigured: isModelConfigured)
                     }
+
+                    if let visibleLiveDraft {
+                        LiveDraftTranscriptView(draft: visibleLiveDraft)
+                    }
                 }
                 .padding(.vertical, 2)
             }
         }
+    }
+
+    private var visibleLiveDraft: LiveTranscriptDraft? {
+        guard liveDraft?.meetingID == meeting.id else { return nil }
+        return liveDraft
     }
 }
 
@@ -619,6 +637,71 @@ private struct TranscriptSegmentView: View {
         case .question: .blue
         case .decision: AppTheme.amber
         case .actionItem: .red
+        }
+    }
+}
+
+private struct LiveDraftTranscriptView: View {
+    let draft: LiveTranscriptDraft
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("Live")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(AppTheme.muted)
+                Text("Capturing")
+                    .font(.caption.bold())
+                    .foregroundStyle(AppTheme.ink)
+                ListeningDots()
+                Spacer()
+                Text("temporary")
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(AppTheme.amber.opacity(0.16), in: Capsule())
+                    .foregroundStyle(AppTheme.amber)
+            }
+
+            Text(draft.text)
+                .font(.system(.body, design: .rounded))
+                .foregroundStyle(AppTheme.ink)
+                .textSelection(.enabled)
+                .animation(.easeOut(duration: 0.16), value: draft.text)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.white.opacity(0.74))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(AppTheme.amber.opacity(0.28), lineWidth: 1)
+                )
+                .shadow(color: AppTheme.amber.opacity(0.12), radius: 16, x: 0, y: 8)
+        )
+    }
+}
+
+private struct ListeningDots: View {
+    @State private var phase = 0
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(AppTheme.amber)
+                    .frame(width: 4, height: 4)
+                    .opacity(phase == index ? 1 : 0.34)
+                    .scaleEffect(phase == index ? 1.25 : 0.86)
+            }
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: false)) {
+                phase = 2
+            }
+        }
+        .onReceive(Timer.publish(every: 0.45, on: .main, in: .common).autoconnect()) { _ in
+            phase = (phase + 1) % 3
         }
     }
 }

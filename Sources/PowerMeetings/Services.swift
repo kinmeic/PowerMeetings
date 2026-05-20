@@ -184,6 +184,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
     private var converter: AVAudioConverter?
     private var outputFormat: AVAudioFormat?
     private var isStoppingIntentionally = false
+    private var fallbackLanguageID = LocalMeetingLanguage.mandarinChinese.rawValue
 
     func start(
         configuration: ModelConfiguration,
@@ -224,6 +225,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
         isTaskStarted = false
         isStoppingIntentionally = false
         pendingAudioChunks = []
+        fallbackLanguageID = configuration.localLanguage
 
         var request = URLRequest(url: URL(string: "wss://dashscope.aliyuncs.com/api-ws/v1/inference")!)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -398,7 +400,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
                   (sentence["heartbeat"] as? Bool) != true,
                   let text = sentence["text"] as? String else { return }
             let isFinal = sentence["sentence_end"] as? Bool ?? false
-            onTranscript(text, inferredLanguageID(for: text), isFinal)
+            onTranscript(text, languageID(from: sentence, output: output, payload: payload), isFinal)
         case "task-failed":
             let message = header["error_message"] as? String ?? "Unknown Paraformer task failure."
             isStoppingIntentionally = true
@@ -414,10 +416,54 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
         webSocketTask?.send(.string(text)) { _ in }
     }
 
-    private func inferredLanguageID(for text: String) -> String {
-        let cjkCount = text.unicodeScalars.filter { (0x4E00...0x9FFF).contains(Int($0.value)) }.count
-        let latinCount = text.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) && (0x0000...0x024F).contains(Int($0.value)) }.count
-        return cjkCount > latinCount ? LocalMeetingLanguage.mandarinChinese.rawValue : LocalMeetingLanguage.english.rawValue
+    private func languageID(
+        from sentence: [String: Any],
+        output: [String: Any],
+        payload: [String: Any]
+    ) -> String {
+        let candidate = firstLanguageValue(in: [sentence, output, payload])
+        return normalizedLanguageID(candidate) ?? fallbackLanguageID
+    }
+
+    private func firstLanguageValue(in objects: [[String: Any]]) -> String? {
+        let keys = [
+            "language",
+            "language_code",
+            "language_id",
+            "lang",
+            "locale"
+        ]
+        for object in objects {
+            for key in keys {
+                if let value = object[key] as? String,
+                   value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                    return value
+                }
+            }
+            for value in object.values {
+                if let nested = value as? [String: Any],
+                   let language = firstLanguageValue(in: [nested]) {
+                    return language
+                }
+            }
+        }
+        return nil
+    }
+
+    private func normalizedLanguageID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased()
+        guard normalized.isEmpty == false else { return nil }
+        if normalized.hasPrefix("zh") || normalized == "chinese" || normalized == "mandarin" {
+            return LocalMeetingLanguage.mandarinChinese.rawValue
+        }
+        if normalized.hasPrefix("en") || normalized == "english" {
+            return LocalMeetingLanguage.english.rawValue
+        }
+        return normalized
     }
 
     private func stopOnQueue() {
@@ -1198,7 +1244,6 @@ final class MeetingSessionViewModel: ObservableObject {
               cleanTranscript != lastFinalizedTranscripts[languageID],
               appendSegment != nil else { return }
         guard cleanTranscript.count >= 2 else { return }
-        guard shouldAcceptTranscript(cleanTranscript, languageID: languageID) else { return }
         lastEmittedTranscripts[languageID] = cleanTranscript
 
         updatePendingTranscript(cleanTranscript, languageID: languageID)
@@ -1394,45 +1439,11 @@ final class MeetingSessionViewModel: ObservableObject {
         }
     }
 
-    private func shouldAcceptTranscript(_ transcript: String, languageID: String) -> Bool {
-        let candidateScore = languageConfidenceScore(transcript, languageID: languageID)
-        guard candidateScore >= 0.45 else { return false }
-        guard let activeLiveLanguageID else { return true }
-        if activeLiveLanguageID == languageID { return true }
-
-        let activeText = pendingLiveTranscripts[activeLiveLanguageID] ?? ""
-        let activeScore = languageConfidenceScore(activeText, languageID: activeLiveLanguageID)
-        return candidateScore >= activeScore + 0.18
-            || transcript.count >= max(activeText.count + 10, 18)
-    }
-
     private func liveRecognitionLanguageIDs(localLanguage: String) -> [String] {
         let alternatives = LocalMeetingLanguage.allCases
             .map(\.rawValue)
             .filter { $0 != localLanguage }
         return [localLanguage] + alternatives
-    }
-
-    private func languageConfidenceScore(_ transcript: String, languageID: String) -> Double {
-        let scalars = transcript.unicodeScalars.filter { CharacterSet.letters.contains($0) }
-        guard scalars.isEmpty == false else { return 0 }
-
-        let cjkCount = scalars.filter { scalar in
-            (0x4E00...0x9FFF).contains(Int(scalar.value))
-        }.count
-        let latinCount = scalars.filter { scalar in
-            CharacterSet.alphanumerics.contains(scalar)
-                && (0x0000...0x024F).contains(Int(scalar.value))
-        }.count
-
-        switch languageID {
-        case LocalMeetingLanguage.mandarinChinese.rawValue:
-            return Double(cjkCount) / Double(scalars.count)
-        case LocalMeetingLanguage.english.rawValue:
-            return Double(latinCount) / Double(scalars.count)
-        default:
-            return 0.5
-        }
     }
 
     private func appendSpeechUnavailableSegment(reason: String) {

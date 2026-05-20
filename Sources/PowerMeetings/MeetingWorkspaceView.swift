@@ -493,6 +493,7 @@ private struct TranscriptTimelineView: View {
     let modelConfiguration: ModelConfiguration
     let isTranscribingRecording: Bool
     let onTranscribeRecording: () -> Void
+    private let bottomAnchorID = "transcript-timeline-bottom"
 
     private var isModelConfigured: Bool {
         modelConfiguration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -522,26 +523,49 @@ private struct TranscriptTimelineView: View {
                 )
             }
 
-            ScrollView {
-                LazyVStack(spacing: 14) {
-                    if segments.isEmpty && visibleLiveDraft == nil {
-                        ContentUnavailableView(
-                            "Ready for live transcription",
-                            systemImage: "waveform.and.mic",
-                            description: Text("Start the meeting and transcript segments will appear here.")
-                        )
-                        .padding(.top, 80)
-                    }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        if segments.isEmpty && visibleLiveDraft == nil {
+                            ContentUnavailableView(
+                                "Ready for live transcription",
+                                systemImage: "waveform.and.mic",
+                                description: Text("Start the meeting and transcript segments will appear here.")
+                            )
+                            .padding(.top, 80)
+                        }
 
-                    ForEach(segments) { segment in
-                        TranscriptSegmentView(segment: segment, isModelConfigured: isModelConfigured)
-                    }
+                        ForEach(segments) { segment in
+                            TranscriptSegmentView(segment: segment, isModelConfigured: isModelConfigured)
+                        }
 
-                    if let visibleLiveDraft {
-                        LiveDraftTranscriptView(draft: visibleLiveDraft)
+                        if let visibleLiveDraft {
+                            LiveDraftTranscriptView(draft: visibleLiveDraft)
+                        }
+
+                        Color.clear
+                            .frame(height: 1)
+                            .id(bottomAnchorID)
                     }
+                    .padding(.vertical, 2)
                 }
-                .padding(.vertical, 2)
+                .onChange(of: segments) { _, _ in
+                    scrollToLatest(proxy: proxy)
+                }
+                .onChange(of: liveDraft?.text) { _, _ in
+                    scrollToLatest(proxy: proxy)
+                }
+                .onChange(of: meeting.id) { _, _ in
+                    scrollToLatest(proxy: proxy)
+                }
+            }
+        }
+    }
+
+    private func scrollToLatest(proxy: ScrollViewProxy) {
+        Task { @MainActor in
+            withAnimation(.easeOut(duration: 0.16)) {
+                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
             }
         }
     }

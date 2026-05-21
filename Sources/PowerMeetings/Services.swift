@@ -2,6 +2,9 @@
 import Combine
 import Foundation
 import Speech
+#if canImport(ScreenCaptureKit)
+import ScreenCaptureKit
+#endif
 
 enum SpeechAuthorizationBridge {
     nonisolated static var currentStatus: SFSpeechRecognizerAuthorizationStatus {
@@ -600,6 +603,118 @@ private enum AudioMeterCalculator {
     }
 }
 
+private final class NoiseSuppressingMicrophoneRecorder: @unchecked Sendable {
+    private let engine = AVAudioEngine()
+    private let highPass = AVAudioUnitEQ(numberOfBands: 1)
+    private let queue = DispatchQueue(label: "PowerMeetings.NoiseSuppressingMicrophoneRecorder")
+    private var writer: AudioFileWriter?
+    private var outputURL: URL?
+    private var isRunning = false
+    private let onLevel: @Sendable (Double) -> Void
+
+    init(onLevel: @escaping @Sendable (Double) -> Void) {
+        self.onLevel = onLevel
+    }
+
+    func start(url: URL) throws {
+        outputURL = url
+        configureProcessingChain()
+
+        let inputNode = engine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            throw NSError(domain: "PowerMeetings", code: 10, userInfo: [
+                NSLocalizedDescriptionKey: "No microphone input format was available."
+            ])
+        }
+
+        engine.attach(highPass)
+        engine.connect(inputNode, to: highPass, format: inputFormat)
+        engine.connect(highPass, to: engine.mainMixerNode, format: inputFormat)
+        engine.mainMixerNode.outputVolume = 0
+
+        let file = try AVAudioFile(forWriting: url, settings: Self.fileSettings(format: inputFormat))
+        writer = AudioFileWriter(file: file)
+
+        highPass.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] (buffer: AVAudioPCMBuffer, _: AVAudioTime) in
+            guard let self else { return }
+            self.applySoftNoiseGate(to: buffer)
+            let level = AudioMeterCalculator.audioLevel(from: buffer)
+            self.onLevel(level)
+            self.queue.async { [weak self] in
+                do {
+                    try self?.writer?.write(buffer)
+                } catch {
+                    // Keep the realtime audio callback lightweight; stop is handled by the caller.
+                }
+            }
+        }
+
+        engine.prepare()
+        try engine.start()
+        isRunning = true
+    }
+
+    func pause() {
+        guard isRunning else { return }
+        engine.pause()
+        isRunning = false
+    }
+
+    func resume() throws {
+        guard isRunning == false else { return }
+        try engine.start()
+        isRunning = true
+    }
+
+    func stop() {
+        highPass.removeTap(onBus: 0)
+        engine.stop()
+        engine.reset()
+        writer = nil
+        isRunning = false
+    }
+
+    private func configureProcessingChain() {
+        if let band = highPass.bands.first {
+            band.filterType = .highPass
+            band.frequency = 85
+            band.bypass = false
+        }
+    }
+
+    private func applySoftNoiseGate(to buffer: AVAudioPCMBuffer) {
+        guard let channelData = buffer.floatChannelData else { return }
+        let frameLength = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        let noiseFloor: Float = 0.012
+        let speechFloor: Float = 0.05
+
+        for channel in 0..<channelCount {
+            let samples = channelData[channel]
+            for frame in 0..<frameLength {
+                let value = samples[frame]
+                let magnitude = abs(value)
+                if magnitude < noiseFloor {
+                    samples[frame] = value * 0.18
+                } else if magnitude < speechFloor {
+                    let blend = (magnitude - noiseFloor) / (speechFloor - noiseFloor)
+                    samples[frame] = value * (0.18 + 0.82 * blend)
+                }
+            }
+        }
+    }
+
+    private static func fileSettings(format: AVAudioFormat) -> [String: Any] {
+        [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: format.sampleRate,
+            AVNumberOfChannelsKey: Int(format.channelCount),
+            AVEncoderBitRateKey: 64_000
+        ]
+    }
+}
+
 @MainActor
 final class AudioDeviceManager: ObservableObject {
     @Published private(set) var devices: [AudioInputDevice] = []
@@ -707,6 +822,150 @@ final class SettingsAudioLevelMonitor: NSObject, ObservableObject, AVCaptureAudi
     }
 }
 
+#if canImport(ScreenCaptureKit)
+private final class SystemAudioCaptureEngine: NSObject, @unchecked Sendable {
+    private let queue = DispatchQueue(label: "PowerMeetings.SystemAudioCapture")
+    private var stream: SCStream?
+    private var assetWriter: AVAssetWriter?
+    private var writerInput: AVAssetWriterInput?
+    private var didStartWriting = false
+    private(set) var outputURL: URL?
+
+    func start(in directory: URL) {
+        queue.async { [weak self] in
+            Task {
+                await self?.startCapture(in: directory)
+            }
+        }
+    }
+
+    func stop(completion: @escaping @Sendable (URL?) -> Void) {
+        queue.async { [weak self] in
+            guard let self else {
+                completion(nil)
+                return
+            }
+            let stream = self.stream
+            self.stream = nil
+            Task {
+                if let stream {
+                    try? await stream.stopCapture()
+                }
+                self.queue.async {
+                    self.finishWriter(completion: completion)
+                }
+            }
+        }
+    }
+
+    private func startCapture(in directory: URL) async {
+        do {
+            let url = directory.appendingPathComponent("system-audio-\(UUID().uuidString).m4a")
+            let writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
+            let input = AVAssetWriterInput(
+                mediaType: .audio,
+                outputSettings: [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: 48_000,
+                    AVNumberOfChannelsKey: 2,
+                    AVEncoderBitRateKey: 128_000
+                ]
+            )
+            input.expectsMediaDataInRealTime = true
+            if writer.canAdd(input) {
+                writer.add(input)
+            }
+
+            outputURL = url
+            assetWriter = writer
+            writerInput = input
+            didStartWriting = false
+
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+            guard let display = content.displays.first else { return }
+
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let configuration = SCStreamConfiguration()
+            configuration.capturesAudio = true
+            configuration.excludesCurrentProcessAudio = true
+            configuration.width = 2
+            configuration.height = 2
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+
+            let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
+            try await stream.startCapture()
+            self.stream = stream
+        } catch {
+            finishWriter { _ in }
+        }
+    }
+
+    private func append(_ sampleBuffer: CMSampleBuffer) {
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+              let assetWriter,
+              let writerInput else { return }
+
+        if didStartWriting == false {
+            guard assetWriter.startWriting() else { return }
+            assetWriter.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            didStartWriting = true
+        }
+
+        if writerInput.isReadyForMoreMediaData {
+            writerInput.append(sampleBuffer)
+        }
+    }
+
+    private func finishWriter(completion: @escaping @Sendable (URL?) -> Void) {
+        guard let writer = assetWriter else {
+            completion(nil)
+            return
+        }
+        let url = outputURL
+        assetWriter = nil
+        writerInput?.markAsFinished()
+        writerInput = nil
+
+        guard didStartWriting else {
+            if let url {
+                try? FileManager.default.removeItem(at: url)
+            }
+            outputURL = nil
+            completion(nil)
+            return
+        }
+
+        writer.finishWriting {
+            if writer.status == .completed, let url {
+                completion(url)
+            } else {
+                if let url {
+                    try? FileManager.default.removeItem(at: url)
+                }
+                completion(nil)
+            }
+        }
+    }
+}
+
+extension SystemAudioCaptureEngine: SCStreamOutput, SCStreamDelegate {
+    nonisolated func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of outputType: SCStreamOutputType
+    ) {
+        guard outputType == .audio else { return }
+        queue.async { [weak self] in
+            self?.append(sampleBuffer)
+        }
+    }
+}
+#endif
+
 @MainActor
 final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDelegate {
     enum State: Equatable {
@@ -727,7 +986,12 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
     @Published private(set) var isFinalizingRecording = false
 
     private var audioRecorder: AVAudioRecorder?
+    private var noiseSuppressingRecorder: NoiseSuppressingMicrophoneRecorder?
     private var audioPlayer: AVAudioPlayer?
+    #if canImport(ScreenCaptureKit)
+    private var systemAudioCapture: SystemAudioCaptureEngine?
+    private var completedSystemAudioURLs: [URL] = []
+    #endif
     private var levelTimer: Timer?
     private var elapsedTimer: Timer?
     private var playbackTimer: Timer?
@@ -779,28 +1043,59 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
         activeMeetingID = meetingID
         lastSettings = settings
         onRecordingReady = nil
+        #if canImport(ScreenCaptureKit)
+        completedSystemAudioURLs = []
+        #endif
 
-        let url = makeRecordingDirectory().appendingPathComponent("recording-\(UUID().uuidString).m4a")
-        do {
-            let recorder = try AVAudioRecorder(url: url, settings: Self.recordingSettings)
-            recorder.delegate = self
-            recorder.isMeteringEnabled = true
-            guard recorder.prepareToRecord(), recorder.record() else {
-                state = .failed("Could not start the audio recorder.")
-                activeMeetingID = nil
-                return false
-            }
-            audioRecorder = recorder
-            recordingURL = url
-        } catch {
-            state = .failed("Could not start recording: \(error.localizedDescription)")
+        let recordingDirectory = makeRecordingDirectory()
+        let url = recordingDirectory.appendingPathComponent("recording-\(UUID().uuidString).m4a")
+        if settings.enableNoiseSuppression, startNoiseSuppressingRecorder(url: url) == false {
+            noiseSuppressingRecorder = nil
+        }
+
+        if noiseSuppressingRecorder == nil, startStandardRecorder(url: url) == false {
+            state = .failed("Could not start recording.")
             activeMeetingID = nil
             return false
         }
 
         state = .recording(startedAt: Date())
         startMeters()
+        startSystemAudioCaptureIfNeeded(settings: settings, recordingDirectory: recordingDirectory)
         return true
+    }
+
+    private func startNoiseSuppressingRecorder(url: URL) -> Bool {
+        let recorder = NoiseSuppressingMicrophoneRecorder { [weak self] level in
+            Task { @MainActor in
+                guard let self, self.isRecording else { return }
+                self.inputLevel = level
+            }
+        }
+        do {
+            try recorder.start(url: url)
+            noiseSuppressingRecorder = recorder
+            recordingURL = url
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func startStandardRecorder(url: URL) -> Bool {
+        do {
+            let recorder = try AVAudioRecorder(url: url, settings: Self.recordingSettings)
+            recorder.delegate = self
+            recorder.isMeteringEnabled = true
+            guard recorder.prepareToRecord(), recorder.record() else {
+                return false
+            }
+            audioRecorder = recorder
+            recordingURL = url
+            return true
+        } catch {
+            return false
+        }
     }
 
     func pause() {
@@ -808,6 +1103,16 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
         accumulatedElapsed += Date().timeIntervalSince(startedAt)
         elapsed = accumulatedElapsed
         audioRecorder?.pause()
+        noiseSuppressingRecorder?.pause()
+        #if canImport(ScreenCaptureKit)
+        systemAudioCapture?.stop { [weak self] url in
+            guard let url else { return }
+            Task { @MainActor in
+                self?.completedSystemAudioURLs.append(url)
+            }
+        }
+        systemAudioCapture = nil
+        #endif
         state = .paused
         stopMeters()
         inputLevel = 0
@@ -815,13 +1120,28 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
 
     @discardableResult
     func resume() -> Bool {
-        guard state == .paused, let recorder = audioRecorder else { return false }
-        guard recorder.record() else {
-            state = .failed("Could not resume recording.")
-            return false
+        guard state == .paused else { return false }
+        if let recorder = audioRecorder {
+            guard recorder.record() else {
+                state = .failed("Could not resume recording.")
+                return false
+            }
+        } else if let noiseSuppressingRecorder {
+            do {
+                try noiseSuppressingRecorder.resume()
+            } catch {
+                state = .failed("Could not resume processed recording: \(error.localizedDescription)")
+                return false
+            }
         }
         state = .recording(startedAt: Date())
         startMeters()
+        if lastSettings.enableSystemAudio, let recordingURL {
+            startSystemAudioCaptureIfNeeded(
+                settings: lastSettings,
+                recordingDirectory: recordingURL.deletingLastPathComponent()
+            )
+        }
         return true
     }
 
@@ -830,20 +1150,34 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
             accumulatedElapsed += Date().timeIntervalSince(startedAt)
             elapsed = accumulatedElapsed
         }
+        let microphoneURL = recordingURL
         audioRecorder?.stop()
         audioRecorder = nil
+        noiseSuppressingRecorder?.stop()
+        noiseSuppressingRecorder = nil
         state = .ended
         inputLevel = 0
         playbackPosition = 0
         stopMeters()
         stopPlayback()
         activeMeetingID = nil
-        notifyRecordingReadyIfNeeded()
+        finishSystemAudioAndNotify(microphoneURL: microphoneURL)
     }
 
     func stop() {
         audioRecorder?.stop()
         audioRecorder = nil
+        noiseSuppressingRecorder?.stop()
+        noiseSuppressingRecorder = nil
+        #if canImport(ScreenCaptureKit)
+        systemAudioCapture?.stop { [weak self] url in
+            guard let url else { return }
+            Task { @MainActor in
+                self?.completedSystemAudioURLs.append(url)
+            }
+        }
+        systemAudioCapture = nil
+        #endif
         state = .idle
         activeMeetingID = nil
         accumulatedElapsed = 0
@@ -948,9 +1282,148 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
         elapsedTimer = nil
     }
 
+    private func startSystemAudioCaptureIfNeeded(settings: AudioCaptureSettings, recordingDirectory: URL) {
+        guard settings.enableSystemAudio else { return }
+        #if canImport(ScreenCaptureKit)
+        let capture = SystemAudioCaptureEngine()
+        systemAudioCapture = capture
+        capture.start(in: recordingDirectory)
+        #endif
+    }
+
+    private func finishSystemAudioAndNotify(microphoneURL: URL?) {
+        #if canImport(ScreenCaptureKit)
+        guard let capture = systemAudioCapture else {
+            mixSystemAudioIfNeeded(microphoneURL: microphoneURL, systemAudioURLs: completedSystemAudioURLs)
+            return
+        }
+        isFinalizingRecording = true
+        systemAudioCapture = nil
+        capture.stop { [weak self] url in
+            Task { @MainActor in
+                guard let self else { return }
+                var urls = self.completedSystemAudioURLs
+                if let url {
+                    urls.append(url)
+                }
+                self.mixSystemAudioIfNeeded(microphoneURL: microphoneURL, systemAudioURLs: urls)
+            }
+        }
+        #else
+        notifyRecordingReadyIfNeeded()
+        #endif
+    }
+
+    private func mixSystemAudioIfNeeded(microphoneURL: URL?, systemAudioURLs: [URL]) {
+        guard let microphoneURL,
+              systemAudioURLs.isEmpty == false else {
+            isFinalizingRecording = false
+            notifyRecordingReadyIfNeeded()
+            return
+        }
+
+        isFinalizingRecording = true
+        let outputURL = microphoneURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("mixed-recording-\(UUID().uuidString).m4a")
+
+        Task {
+            do {
+                try await Self.mixAudioFiles(
+                    microphoneURL: microphoneURL,
+                    systemAudioURLs: systemAudioURLs,
+                    outputURL: outputURL
+                )
+                await MainActor.run {
+                    self.recordingURL = outputURL
+                    self.isFinalizingRecording = false
+                    self.notifyRecordingReadyIfNeeded()
+                }
+            } catch {
+                await MainActor.run {
+                    self.isFinalizingRecording = false
+                    self.notifyRecordingReadyIfNeeded()
+                }
+            }
+        }
+    }
+
     private func notifyRecordingReadyIfNeeded() {
         guard let recordingURL else { return }
         onRecordingReady?(recordingURL, elapsed)
+    }
+
+    nonisolated private static func mixAudioFiles(
+        microphoneURL: URL,
+        systemAudioURLs: [URL],
+        outputURL: URL
+    ) async throws {
+        let composition = AVMutableComposition()
+
+        let microphoneAsset = AVURLAsset(url: microphoneURL)
+        if let microphoneTrack = try await microphoneAsset.loadTracks(withMediaType: .audio).first,
+           let compositionTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+           ) {
+            let duration = try await microphoneAsset.load(.duration)
+            try compositionTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: duration),
+                of: microphoneTrack,
+                at: .zero
+            )
+        }
+
+        for systemAudioURL in systemAudioURLs where FileManager.default.fileExists(atPath: systemAudioURL.path) {
+            let systemAsset = AVURLAsset(url: systemAudioURL)
+            guard let systemTrack = try await systemAsset.loadTracks(withMediaType: .audio).first,
+                  let compositionTrack = composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                  ) else { continue }
+            let duration = try await systemAsset.load(.duration)
+            try compositionTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: duration),
+                of: systemTrack,
+                at: .zero
+            )
+        }
+
+        guard let exportSession = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            throw NSError(domain: "PowerMeetings", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Could not create audio mix export session."
+            ])
+        }
+
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .m4a
+
+        try await withCheckedThrowingContinuation { continuation in
+            exportSession.exportAsynchronously {
+                switch exportSession.status {
+                case .completed:
+                    continuation.resume()
+                case .failed, .cancelled:
+                    continuation.resume(throwing: exportSession.error ?? NSError(
+                        domain: "PowerMeetings",
+                        code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio mix export failed."]
+                    ))
+                default:
+                    continuation.resume(throwing: NSError(
+                        domain: "PowerMeetings",
+                        code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio mix export ended unexpectedly."]
+                    ))
+                }
+            }
+        }
     }
 
     private func makeRecordingDirectory() -> URL {

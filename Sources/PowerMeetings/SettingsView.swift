@@ -17,6 +17,8 @@ struct SettingsView: View {
 
     @State private var selectedTab = SettingsTab.audio
     @State private var selectedAudioDeviceID: String?
+    @State private var noiseSuppressionEnabled = false
+    @State private var systemAudioCaptureEnabled = false
     @State private var provider = ModelProvider.openAI.rawValue
     @State private var apiBaseURL = ""
     @State private var apiKey = ""
@@ -144,10 +146,13 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Capture Roadmap") {
-                Toggle("Noise suppression", isOn: .constant(true))
-                Toggle("System audio capture", isOn: .constant(false))
-                Text("System audio capture will use ScreenCaptureKit and requires a separate macOS permission flow.")
+            Section("Capture Processing") {
+                Toggle("Noise suppression", isOn: $noiseSuppressionEnabled)
+                Text("Uses an AVAudioEngine processing chain with a high-pass filter and dynamics processor before writing the microphone track. If processing cannot start, recording falls back to the standard recorder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("System audio capture", isOn: $systemAudioCaptureEnabled)
+                Text("Captures system/app playback with ScreenCaptureKit and mixes it into the meeting recording when the meeting ends. macOS may ask for Screen Recording permission.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -253,6 +258,8 @@ struct SettingsView: View {
 
     private func loadDraftValues() {
         selectedAudioDeviceID = audioDeviceManager.selectedDeviceID
+        noiseSuppressionEnabled = modelSettings.noiseSuppressionEnabled
+        systemAudioCaptureEnabled = modelSettings.systemAudioCaptureEnabled
         provider = modelSettings.provider
         apiBaseURL = modelSettings.apiBaseURL
         apiKey = modelSettings.apiKey
@@ -372,6 +379,8 @@ struct SettingsView: View {
             basePath: chatAgentBasePath
         )
         audioDeviceManager.selectedDeviceID = selectedAudioDeviceID
+        modelSettings.noiseSuppressionEnabled = noiseSuppressionEnabled
+        modelSettings.systemAudioCaptureEnabled = systemAudioCaptureEnabled
         modelSettings.provider = provider
         modelSettings.apiBaseURL = apiBaseURL
         modelSettings.apiKey = apiKey

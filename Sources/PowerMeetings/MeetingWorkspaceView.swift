@@ -72,7 +72,11 @@ struct MeetingWorkspaceView: View {
 
     private func startMeeting(meeting: Meeting) {
         guard meetingStore.canStartMeeting(id: meeting.id) else { return }
-        let settings = AudioCaptureSettings(inputDeviceID: audioDeviceManager.selectedDeviceID)
+        let settings = AudioCaptureSettings(
+            inputDeviceID: audioDeviceManager.selectedDeviceID,
+            enableSystemAudio: modelSettings.systemAudioCaptureEnabled,
+            enableNoiseSuppression: modelSettings.noiseSuppressionEnabled
+        )
         guard audioEngine.start(settings: settings, meetingID: meeting.id) else { return }
         session.startLiveTranscription(
             for: meeting.id,

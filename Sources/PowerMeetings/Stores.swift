@@ -298,6 +298,8 @@ final class ModelSettingsStore: ObservableObject {
     @AppStorage("realtimeASR.provider") var realtimeASRProvider = RealtimeASRProvider.macOSSpeech.rawValue
     @AppStorage("realtimeASR.apiKey") var realtimeASRAPIKey = ""
     @AppStorage("realtimeASR.model") var realtimeASRModel = "fun-asr-realtime"
+    @AppStorage("audio.noiseSuppressionEnabled") var noiseSuppressionEnabled = false
+    @AppStorage("audio.systemAudioCaptureEnabled") var systemAudioCaptureEnabled = false
     @AppStorage("model.realtimeModel") var realtimeModel = "gpt-4o-realtime-preview"
     @AppStorage("model.translationModel") var translationModel = "gpt-4.1-mini"
     @AppStorage("model.summaryModel") var summaryModel = "gpt-4.1-mini"

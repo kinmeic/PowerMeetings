@@ -57,11 +57,11 @@ struct AgentPanelView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text("Meeting Agent")
+            Text(AppText.t("meetingAgent", language: modelSettings.localLanguage))
                 .font(.system(.title, design: .serif, weight: .bold))
                 .foregroundStyle(AppTheme.ink)
             Spacer()
-            AgentHealthPill(status: healthStatus)
+            AgentHealthPill(status: healthStatus, language: modelSettings.localLanguage)
         }
     }
 
@@ -75,6 +75,7 @@ struct AgentPanelView: View {
                             activityText: isActiveAgentMessage(message) ? activityText : "",
                             activeTools: isActiveAgentMessage(message) ? activeTools : [],
                             isStreaming: isActiveAgentMessage(message),
+                            language: modelSettings.localLanguage,
                             onClarifyResponse: { response in
                                 submitClarify(response, message: message)
                             },
@@ -82,7 +83,7 @@ struct AgentPanelView: View {
                                 submitApproval(choice, message: message)
                             },
                             onCopy: {
-                                copyToPasteboard(message.content)
+                                copyToPasteboard(AppText.localizedAgentContent(message.content, language: modelSettings.localLanguage))
                             }
                         )
                             .id(message.id)
@@ -104,7 +105,7 @@ struct AgentPanelView: View {
             AgentComposerTextView(
                 text: $draft,
                 measuredHeight: $composerHeight,
-                placeholder: "Ask about this meeting...",
+                placeholder: AppText.t("askMeeting", language: modelSettings.localLanguage),
                 onSend: {
                     guard isStreaming == false else { return }
                     send()
@@ -150,7 +151,7 @@ struct AgentPanelView: View {
         let history = chatHistory(meetingID: meetingID)
         let currentConversationID = meetingStore.conversationID(for: meetingID)
         isStreaming = true
-        activityText = "Thinking..."
+        activityText = AppText.t("thinking", language: modelSettings.localLanguage)
 
         streamTask = Task {
             do {
@@ -212,7 +213,7 @@ struct AgentPanelView: View {
             activityText = status
         case let .toolCall(tools):
             activeTools = tools
-            activityText = "Using tools..."
+            activityText = AppText.t("usingTools", language: modelSettings.localLanguage)
         case let .approvalRequired(approval):
             activityText = ""
             activeTools = []
@@ -324,7 +325,7 @@ struct AgentPanelView: View {
         NSPasteboard.general.setString(content, forType: .string)
         #endif
         withAnimation(.easeOut(duration: 0.16)) {
-            toastText = "Copied"
+            toastText = AppText.t("copied", language: modelSettings.localLanguage)
         }
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.2))
@@ -337,6 +338,7 @@ struct AgentPanelView: View {
 
 private struct AgentHealthPill: View {
     let status: ChatAgentHealthStatus
+    let language: String
 
     var body: some View {
         HStack(spacing: 6) {
@@ -356,11 +358,11 @@ private struct AgentHealthPill: View {
     private var label: String {
         switch status {
         case .checking:
-            "Checking"
+            AppText.t("checking", language: language)
         case .online:
-            "Online"
+            AppText.t("online", language: language)
         case .offline:
-            "Offline"
+            AppText.t("offline", language: language)
         }
     }
 
@@ -378,11 +380,11 @@ private struct AgentHealthPill: View {
     private var help: String {
         switch status {
         case .checking:
-            "Checking Chat Agent health."
+            AppText.t("healthCheckingHelp", language: language)
         case .online:
-            "Chat Agent health check is passing."
+            AppText.t("healthOnlineHelp", language: language)
         case let .offline(reason):
-            "Chat Agent health check failed: \(reason)"
+            String(format: AppText.t("healthOfflineHelp", language: language), reason)
         }
     }
 }
@@ -497,6 +499,7 @@ private struct AgentBubbleView: View {
     let activityText: String
     let activeTools: [String]
     let isStreaming: Bool
+    let language: String
     let onClarifyResponse: (String) -> Void
     let onApprovalChoice: (String) -> Void
     let onCopy: () -> Void
@@ -511,9 +514,9 @@ private struct AgentBubbleView: View {
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                     if message.content.isEmpty && isStreaming {
-                        AgentActivityView(status: activityText.isEmpty ? "Thinking" : activityText, tools: activeTools)
+                        AgentActivityView(status: activityText.isEmpty ? AppText.t("thinking", language: language) : activityText, tools: activeTools)
                     } else {
-                        MarkdownText(content: message.content, isUserBubble: message.sender == .user)
+                        MarkdownText(content: displayContent, isUserBubble: message.sender == .user)
                             .textSelection(.enabled)
 
                         if isStreaming && (activityText.isEmpty == false || activeTools.isEmpty == false) {
@@ -523,11 +526,11 @@ private struct AgentBubbleView: View {
                     }
 
                     if let clarify = message.clarify {
-                        AgentClarifyCard(clarify: clarify, onSubmit: onClarifyResponse)
+                        AgentClarifyCard(clarify: clarify, language: language, onSubmit: onClarifyResponse)
                     }
 
                     if let approval = message.approval {
-                        AgentApprovalCard(approval: approval, onChoice: onApprovalChoice)
+                        AgentApprovalCard(approval: approval, language: language, onChoice: onApprovalChoice)
                     }
                 }
                 .padding(13)
@@ -541,7 +544,7 @@ private struct AgentBubbleView: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(AppTheme.muted)
-                .help("Copy message")
+                .help(AppText.t("copyMessage", language: language))
             }
 
             if message.sender != .user { Spacer(minLength: 42) }
@@ -550,10 +553,14 @@ private struct AgentBubbleView: View {
 
     private var label: String {
         switch message.sender {
-        case .user: "You"
-        case .agent: "Agent"
-        case .suggestion: "Suggestion"
+        case .user: AppText.t("you", language: language)
+        case .agent: AppText.t("agent", language: language)
+        case .suggestion: AppText.t("suggestion", language: language)
         }
+    }
+
+    private var displayContent: String {
+        AppText.localizedAgentContent(message.content, language: language)
     }
 
     private var background: Color {
@@ -642,12 +649,13 @@ private struct AgentActivityView: View {
 
 private struct AgentClarifyCard: View {
     let clarify: AgentClarifyRequest
+    let language: String
     let onSubmit: (String) -> Void
     @State private var response = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Clarification needed", systemImage: "questionmark.bubble")
+            Label(AppText.t("clarificationNeeded", language: language), systemImage: "questionmark.bubble")
                 .font(.caption.bold())
                 .foregroundStyle(AppTheme.moss)
             Text(clarify.question)
@@ -655,7 +663,7 @@ private struct AgentClarifyCard: View {
                 .textSelection(.enabled)
 
             if clarify.resolved {
-                Label(clarify.response ?? "Answered", systemImage: "checkmark.circle.fill")
+                Label(clarify.response ?? AppText.t("answered", language: language), systemImage: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(AppTheme.moss)
             } else if clarify.choices.isEmpty == false {
@@ -676,12 +684,12 @@ private struct AgentClarifyCard: View {
                 }
             } else {
                 HStack(spacing: 8) {
-                    TextField("Reply...", text: $response)
+                    TextField(AppText.t("replyPlaceholder", language: language), text: $response)
                         .textFieldStyle(.plain)
                         .onSubmit(submit)
                         .padding(9)
                         .background(.white.opacity(0.68), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    Button("Reply", action: submit)
+                    Button(AppText.t("reply", language: language), action: submit)
                         .buttonStyle(.borderless)
                         .font(.caption.bold())
                         .padding(.horizontal, 10)
@@ -705,11 +713,12 @@ private struct AgentClarifyCard: View {
 
 private struct AgentApprovalCard: View {
     let approval: AgentApprovalRequest
+    let language: String
     let onChoice: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Command approval required", systemImage: "exclamationmark.triangle.fill")
+            Label(AppText.t("approvalRequired", language: language), systemImage: "exclamationmark.triangle.fill")
                 .font(.caption.bold())
                 .foregroundStyle(AppTheme.amber)
             Text(approval.description)
@@ -731,9 +740,9 @@ private struct AgentApprovalCard: View {
                     .foregroundStyle(approval.choice == "deny" ? .red : AppTheme.moss)
             } else {
                 HStack(spacing: 7) {
-                    approvalButton("Allow", choice: "allow", color: AppTheme.moss)
-                    approvalButton("Deny", choice: "deny", color: .red)
-                    approvalButton("Always", choice: "allow_always", color: AppTheme.ink)
+                    approvalButton(AppText.t("allow", language: language), choice: "allow", color: AppTheme.moss)
+                    approvalButton(AppText.t("deny", language: language), choice: "deny", color: .red)
+                    approvalButton(AppText.t("always", language: language), choice: "allow_always", color: AppTheme.ink)
                     approvalButton("YOLO", choice: "yolo", color: AppTheme.amber)
                 }
             }

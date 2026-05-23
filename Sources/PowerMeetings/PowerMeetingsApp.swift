@@ -29,7 +29,7 @@ struct PowerMeetingsApp: App {
         .commands {
             CommandGroup(replacing: .appSettings) {
                 SettingsLink {
-                    Text("Settings...")
+                    Text(AppText.t("settingsMenu", language: modelSettings.localLanguage))
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }

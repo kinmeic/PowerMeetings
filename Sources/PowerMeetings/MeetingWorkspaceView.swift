@@ -36,9 +36,10 @@ struct MeetingWorkspaceView: View {
                 )
 
                 Picker("", selection: $selectedTab) {
-                    Text("Live").tag("Live")
-                    Text("Summary").tag("Summary")
-                    Text("People").tag("People")
+                    Text(AppText.t("live", language: modelSettings.localLanguage)).tag("Live")
+                    Text(AppText.t("people", language: modelSettings.localLanguage)).tag("People")
+                    Text(AppText.t("summary", language: modelSettings.localLanguage)).tag("Summary")
+                    Text(AppText.t("log", language: modelSettings.localLanguage)).tag("Log")
                 }
                 .pickerStyle(.segmented)
 
@@ -53,11 +54,13 @@ struct MeetingWorkspaceView: View {
                     )
                 } else if selectedTab == "Summary" {
                     SummaryView(meeting: meeting)
-                } else {
+                } else if selectedTab == "People" {
                     ParticipantsView(meeting: meeting)
+                } else {
+                    MeetingLogView(logs: meetingStore.selectedMeetingLogs)
                 }
             } else {
-                ContentUnavailableView("No meeting selected", systemImage: "calendar.badge.clock")
+                ContentUnavailableView(AppText.t("noMeetingSelected", language: modelSettings.localLanguage), systemImage: "calendar.badge.clock")
             }
         }
         .padding(22)
@@ -93,6 +96,9 @@ struct MeetingWorkspaceView: View {
             },
             updateTranslation: { id, translatedText in
                 meetingStore.updateSegmentTranslation(id: id, translatedText: translatedText)
+            },
+            appendLog: { entry in
+                meetingStore.appendLog(entry)
             }
         )
         meetingStore.updateMeeting(id: meeting.id) { $0.status = .inProgress }
@@ -127,8 +133,9 @@ struct MeetingWorkspaceView: View {
         selectedTab = "Summary"
         meetingStore.updateMeeting(id: meeting.id) {
             $0.status = .completed
-            if $0.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || $0.summary == "No summary yet." {
-                $0.summary = "No summary yet. Click Generate Summary when you are ready."
+            let trimmedSummary = $0.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedSummary.isEmpty || trimmedSummary == "No summary yet." || trimmedSummary == "暂无总结。" {
+                $0.summary = AppText.t("noSummaryAction", language: modelSettings.localLanguage)
             }
             $0.duration = duration
         }
@@ -219,6 +226,7 @@ struct MeetingWorkspaceView: View {
 
 private struct MeetingHeaderView: View {
     @EnvironmentObject private var meetingStore: MeetingStore
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     let meeting: Meeting
     @State private var isEditingName = false
     @State private var draftTitle = ""
@@ -227,7 +235,7 @@ private struct MeetingHeaderView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
                 HStack(spacing: 8) {
-                    Text(meeting.scheduledAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(AppText.meetingDateTime(meeting.scheduledAt, language: modelSettings.localLanguage))
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(AppTheme.muted)
                     Button {
@@ -241,21 +249,21 @@ private struct MeetingHeaderView: View {
                     .buttonStyle(.borderless)
                     .background(.white.opacity(0.62), in: Circle())
                     .foregroundStyle(AppTheme.ink)
-                    .help("Edit meeting name")
+                    .help(AppText.t("editMeetingName", language: modelSettings.localLanguage))
                     .popover(isPresented: $isEditingName, arrowEdge: .bottom) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Edit Meeting Name")
+                            Text(AppText.t("editMeetingNameTitle", language: modelSettings.localLanguage))
                                 .font(.headline)
-                            TextField("Meeting name", text: $draftTitle)
+                            TextField(AppText.t("meetingName", language: modelSettings.localLanguage), text: $draftTitle)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 280)
                                 .onSubmit(saveTitle)
                             HStack {
                                 Spacer()
-                                Button("Cancel") {
+                                Button(AppText.t("cancel", language: modelSettings.localLanguage)) {
                                     isEditingName = false
                                 }
-                                Button("Save", action: saveTitle)
+                                Button(AppText.t("save", language: modelSettings.localLanguage), action: saveTitle)
                                     .buttonStyle(.borderedProminent)
                                     .disabled(draftTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
@@ -264,7 +272,7 @@ private struct MeetingHeaderView: View {
                     }
                 }
                 Spacer()
-                Label(meeting.status.rawValue, systemImage: statusIcon)
+                Label(meeting.status.localizedTitle(language: modelSettings.localLanguage), systemImage: statusIcon)
                     .font(.callout.bold())
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
@@ -301,6 +309,7 @@ private struct MeetingHeaderView: View {
 }
 
 private struct AudioControlBar: View {
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     let meetingStatus: MeetingStatus
     let canStartMeeting: Bool
     @ObservedObject var audioEngine: AudioCaptureEngine
@@ -362,25 +371,25 @@ private struct AudioControlBar: View {
     private var leftAction: some View {
         switch meetingStatus {
         case .scheduled:
-            primaryButton("Start Meeting", systemImage: "record.circle", color: AppTheme.ink, action: onStartMeeting)
+            primaryButton(AppText.t("startMeeting", language: modelSettings.localLanguage), systemImage: "record.circle", color: AppTheme.ink, action: onStartMeeting)
                 .disabled(canStartMeeting == false)
                 .opacity(canStartMeeting ? 1 : 0.45)
-                .help(canStartMeeting ? "Start meeting" : "End the current active meeting before starting another.")
+                .help(canStartMeeting ? AppText.t("startMeetingHelp", language: modelSettings.localLanguage) : AppText.t("activeMeetingHelp", language: modelSettings.localLanguage))
         case .inProgress:
-            secondaryButton("Pause", systemImage: "pause.fill", action: onPause)
+            secondaryButton(AppText.t("pause", language: modelSettings.localLanguage), systemImage: "pause.fill", action: onPause)
         case .paused:
-            primaryButton("Resume", systemImage: "play.fill", color: AppTheme.ink, action: onResume)
+            primaryButton(AppText.t("resume", language: modelSettings.localLanguage), systemImage: "play.fill", color: AppTheme.ink, action: onResume)
         case .processing:
-            Label("Generating...", systemImage: "hourglass")
+            Label(AppText.t("generating", language: modelSettings.localLanguage), systemImage: "hourglass")
                 .font(.headline)
                 .foregroundStyle(AppTheme.muted)
         case .completed:
             if audioEngine.isFinalizingRecording {
-                Label("Saving...", systemImage: "hourglass")
+                Label(AppText.t("saving", language: modelSettings.localLanguage), systemImage: "hourglass")
                     .font(.headline)
                     .foregroundStyle(AppTheme.muted)
             } else {
-                primaryButton(audioEngine.isPlaying ? "Stop" : "Play", systemImage: audioEngine.isPlaying ? "stop.fill" : "play.fill", color: audioEngine.isPlaying ? .red : AppTheme.ink) {
+                primaryButton(audioEngine.isPlaying ? AppText.t("stop", language: modelSettings.localLanguage) : AppText.t("play", language: modelSettings.localLanguage), systemImage: audioEngine.isPlaying ? "stop.fill" : "play.fill", color: audioEngine.isPlaying ? .red : AppTheme.ink) {
                     if audioEngine.isPlaying {
                         onStopPlayback()
                     } else {
@@ -397,7 +406,7 @@ private struct AudioControlBar: View {
         case .scheduled, .processing:
             Color.clear.frame(width: 1, height: 1)
         case .inProgress, .paused:
-            primaryButton("End Meeting", systemImage: "stop.fill", color: AppTheme.moss, action: onEndMeeting)
+            primaryButton(AppText.t("endMeeting", language: modelSettings.localLanguage), systemImage: "stop.fill", color: AppTheme.moss, action: onEndMeeting)
         case .completed:
             iconButton(systemImage: "square.and.arrow.up", action: onExport)
         }
@@ -471,7 +480,7 @@ private struct AudioControlBar: View {
         .buttonStyle(.borderless)
         .background(.white.opacity(0.74), in: Circle())
         .foregroundStyle(AppTheme.ink)
-        .help("Export recording")
+        .help(AppText.t("exportRecording", language: modelSettings.localLanguage))
     }
 }
 
@@ -491,6 +500,7 @@ private struct LevelMeter: View {
 }
 
 private struct TranscriptTimelineView: View {
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     let meeting: Meeting
     let segments: [TranscriptSegment]
     let liveDraft: LiveTranscriptDraft?
@@ -507,12 +517,17 @@ private struct TranscriptTimelineView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            if meeting.status == .completed, meeting.recordingFilePath?.isEmpty == false {
+            if shouldShowTranscribeRecordingButton {
                 HStack {
                     Button {
                         onTranscribeRecording()
                     } label: {
-                        Label(isTranscribingRecording ? "Transcribing..." : "Transcribe Recording", systemImage: "text.bubble")
+                        Label(
+                            isTranscribingRecording
+                                ? AppText.t("transcribing", language: modelSettings.localLanguage)
+                                : AppText.t("transcribeRecording", language: modelSettings.localLanguage),
+                            systemImage: "text.bubble"
+                        )
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(AppTheme.moss)
@@ -532,9 +547,9 @@ private struct TranscriptTimelineView: View {
                     LazyVStack(spacing: 14) {
                         if segments.isEmpty && visibleLiveDraft == nil {
                             ContentUnavailableView(
-                                "Ready for live transcription",
+                                AppText.t("readyLiveTitle", language: modelSettings.localLanguage),
                                 systemImage: "waveform.and.mic",
-                                description: Text("Start the meeting and transcript segments will appear here.")
+                                description: Text(AppText.t("readyLiveDescription", language: modelSettings.localLanguage))
                             )
                             .padding(.top, 80)
                         }
@@ -578,9 +593,16 @@ private struct TranscriptTimelineView: View {
         guard liveDraft?.meetingID == meeting.id else { return nil }
         return liveDraft
     }
+
+    private var shouldShowTranscribeRecordingButton: Bool {
+        meeting.status == .completed &&
+            meeting.recordingFilePath?.isEmpty == false &&
+            segments.filter { $0.kind == .transcript && $0.speaker != "System" }.isEmpty
+    }
 }
 
 private struct ProviderStatusBanner: View {
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     let translationModel: String
 
     var body: some View {
@@ -589,9 +611,9 @@ private struct ProviderStatusBanner: View {
                 .foregroundStyle(AppTheme.amber)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Realtime translation provider is not connected")
+                Text(AppText.t("providerNotConnected", language: modelSettings.localLanguage))
                     .font(.callout.bold())
-                Text("ASR: macOS Speech · Translation: \(translationModel)")
+                Text(String(format: AppText.t("providerStatus", language: modelSettings.localLanguage), translationModel))
                     .font(.caption)
                     .foregroundStyle(AppTheme.muted)
                     .lineLimit(1)
@@ -605,6 +627,7 @@ private struct ProviderStatusBanner: View {
 }
 
 private struct TranscriptSegmentView: View {
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     let segment: TranscriptSegment
     let isModelConfigured: Bool
 
@@ -618,7 +641,7 @@ private struct TranscriptSegmentView: View {
                     .font(.caption.bold())
                     .foregroundStyle(AppTheme.ink)
                 Spacer()
-                Text(segment.kind.rawValue)
+                Text(segment.kind.localizedTitle(language: modelSettings.localLanguage))
                     .font(.caption2.bold())
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
@@ -633,7 +656,7 @@ private struct TranscriptSegmentView: View {
 
             if shouldShowTranslation {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Translation")
+                    Text(AppText.t("translation", language: modelSettings.localLanguage))
                         .font(.caption.bold())
                         .foregroundStyle(AppTheme.amber)
                     Text(segment.translatedText)
@@ -670,20 +693,21 @@ private struct TranscriptSegmentView: View {
 }
 
 private struct LiveDraftTranscriptView: View {
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     let draft: LiveTranscriptDraft
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Text("Live")
+                Text(AppText.t("live", language: modelSettings.localLanguage))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(AppTheme.muted)
-                Text("Capturing")
+                Text(AppText.t("capturing", language: modelSettings.localLanguage))
                     .font(.caption.bold())
                     .foregroundStyle(AppTheme.ink)
                 ListeningDots()
                 Spacer()
-                Text("temporary")
+                Text(AppText.t("temporary", language: modelSettings.localLanguage))
                     .font(.caption2.bold())
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
@@ -744,18 +768,23 @@ private struct SummaryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Meeting Summary")
+                Text(AppText.t("meetingSummary", language: modelSettings.localLanguage))
                     .font(.title2.bold())
                 Spacer()
                 Button {
                     generateSummary()
                 } label: {
-                    Label(isGenerating ? "Generating..." : "Generate Summary", systemImage: "sparkles")
+                    Label(
+                        isGenerating
+                            ? AppText.t("generating", language: modelSettings.localLanguage)
+                            : AppText.t("generateSummary", language: modelSettings.localLanguage),
+                        systemImage: "sparkles"
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(AppTheme.moss)
                 .disabled(isGenerating || canGenerateSummary == false)
-                .help(canGenerateSummary ? "Generate and save meeting summary" : "Configure API Key and Summary Model in Settings first.")
+                .help(canGenerateSummary ? AppText.t("generateSummaryHelp", language: modelSettings.localLanguage) : AppText.t("configureSummaryHelp", language: modelSettings.localLanguage))
             }
 
             if let generationError {
@@ -823,7 +852,7 @@ private struct SummaryView: View {
     }
 
     private var normalizedMarkdownSummary: String {
-        normalizeMarkdown(meeting.summary)
+        normalizeMarkdown(AppText.localizedDefaultSummary(meeting.summary, language: modelSettings.localLanguage))
     }
 
     private func normalizeMarkdown(_ markdown: String) -> String {
@@ -896,7 +925,7 @@ private struct SummaryView: View {
                 isGenerating = false
                 let trimmedSummary = normalizeMarkdown(summary ?? "")
                 if trimmedSummary.isEmpty {
-                    generationError = "Summary generation failed. Please check the Summary Model, API Base URL, and API Key."
+                    generationError = AppText.t("summaryFailed", language: modelSettings.localLanguage)
                     return
                 }
                 meetingStore.updateMeeting(id: meeting.id) {
@@ -909,14 +938,15 @@ private struct SummaryView: View {
 
 private struct ParticipantsView: View {
     @EnvironmentObject private var meetingStore: MeetingStore
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     let meeting: Meeting
     @State private var participantsText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Participants")
+            Text(AppText.t("participants", language: modelSettings.localLanguage))
                 .font(.title2.bold())
-            Text("One person per line")
+            Text(AppText.t("onePersonPerLine", language: modelSettings.localLanguage))
                 .font(.caption)
                 .foregroundStyle(AppTheme.muted)
             TextEditor(text: $participantsText)
@@ -937,6 +967,65 @@ private struct ParticipantsView: View {
         }
         .onChange(of: meeting.id) { _, _ in
             participantsText = meeting.participants.map(\.name).joined(separator: "\n")
+        }
+    }
+}
+
+private struct MeetingLogView: View {
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
+    let logs: [MeetingLogEntry]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(AppText.t("meetingLog", language: modelSettings.localLanguage))
+                .font(.title2.bold())
+
+            if logs.isEmpty {
+                ContentUnavailableView(
+                    AppText.t("noLogsYet", language: modelSettings.localLanguage),
+                    systemImage: "doc.text.magnifyingglass",
+                    description: Text(AppText.t("logsDescription", language: modelSettings.localLanguage))
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(logs.sorted(by: { $0.createdAt < $1.createdAt })) { entry in
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Text(entry.createdAt.formatted(date: .omitted, time: .standard))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(AppTheme.muted)
+                                    Text(entry.level.uppercased())
+                                        .font(.caption2.bold())
+                                        .foregroundStyle(logColor(for: entry.level))
+                                    Spacer()
+                                }
+                                Text(entry.message)
+                                    .font(.callout)
+                                    .foregroundStyle(AppTheme.ink)
+                                    .textSelection(.enabled)
+                            }
+                            .padding(12)
+                            .background(.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .glassCard()
+    }
+
+    private func logColor(for level: String) -> Color {
+        switch level.lowercased() {
+        case "warning":
+            AppTheme.amber
+        case "error":
+            .red
+        default:
+            AppTheme.moss
         }
     }
 }

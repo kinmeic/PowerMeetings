@@ -3,11 +3,22 @@ import Speech
 
 struct SettingsView: View {
     private enum SettingsTab: String, CaseIterable, Identifiable {
-        case audio = "Audio"
-        case realtime = "Realtime"
-        case chatAgent = "Chat Agent"
+        case audio
+        case general
+        case chatAgent
 
-        var id: String { rawValue }
+        var id: String { String(describing: self) }
+
+        func title(language: String) -> String {
+            switch self {
+            case .audio:
+                AppText.t("audio", language: language)
+            case .general:
+                AppText.t("general", language: language)
+            case .chatAgent:
+                AppText.t("chatAgent", language: language)
+            }
+        }
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -44,7 +55,7 @@ struct SettingsView: View {
 
             Picker("", selection: $selectedTab) {
                 ForEach(SettingsTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
+                    Text(tab.title(language: localLanguage)).tag(tab)
                 }
             }
             .pickerStyle(.segmented)
@@ -55,7 +66,7 @@ struct SettingsView: View {
                 switch selectedTab {
                 case .audio:
                     audioSettings
-                case .realtime:
+                case .general:
                     realtimeModelSettings
                 case .chatAgent:
                     chatAgentSettings
@@ -84,9 +95,9 @@ struct SettingsView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Settings")
+                Text(AppText.t("settings", language: localLanguage))
                     .font(.system(.title2, design: .serif, weight: .bold))
-                Text("Configure audio capture, realtime models, and the external WorkAgent chat endpoint.")
+                Text(AppText.t("settingsDescription", language: localLanguage))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -99,22 +110,22 @@ struct SettingsView: View {
 
     private var audioSettings: some View {
         Form {
-            Section("Input Device") {
-                Picker("Default input", selection: $selectedAudioDeviceID) {
+            Section(AppText.t("inputDevice", language: localLanguage)) {
+                Picker(AppText.t("defaultInput", language: localLanguage), selection: $selectedAudioDeviceID) {
                     ForEach(audioDeviceManager.devices) { device in
-                        Text(device.isDefault ? "\(device.name) · System Default" : device.name)
+                        Text(device.isDefault ? "\(device.name) · \(AppText.t("systemDefault", language: localLanguage))" : device.name)
                             .tag(Optional(device.id))
                     }
                 }
 
-                Button("Refresh Devices") {
+                Button(AppText.t("refreshDevices", language: localLanguage)) {
                     audioDeviceManager.refreshDevices()
                 }
 
                 if realtimeASRProvider == RealtimeASRProvider.macOSSpeech.rawValue {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("macOS Speech")
+                            Text(AppText.t("macOSSpeech", language: localLanguage))
                             Spacer()
                             Text(speechAuthorizationLabel)
                                 .font(.caption.bold())
@@ -126,7 +137,7 @@ struct SettingsView: View {
                             }
                             .buttonStyle(.bordered)
                             .disabled(speechAuthorizationStatus == .authorized || isRequestingSpeechAuthorization)
-                            Button("Refresh") {
+                            Button(AppText.t("refresh", language: localLanguage)) {
                                 refreshSpeechAuthorizationStatus()
                             }
                             .buttonStyle(.borderless)
@@ -140,19 +151,19 @@ struct SettingsView: View {
                 }
 
                 HStack(spacing: 14) {
-                    Text("Input Level")
+                    Text(AppText.t("inputLevel", language: localLanguage))
                     Spacer()
                     SettingsInputLevelMeter(level: audioLevelMonitor.level)
                 }
             }
 
-            Section("Capture Processing") {
-                Toggle("Noise suppression", isOn: $noiseSuppressionEnabled)
-                Text("Uses an AVAudioEngine processing chain with a high-pass filter and dynamics processor before writing the microphone track. If processing cannot start, recording falls back to the standard recorder.")
+            Section(AppText.t("captureProcessing", language: localLanguage)) {
+                Toggle(AppText.t("noiseSuppression", language: localLanguage), isOn: $noiseSuppressionEnabled)
+                Text(AppText.t("noiseSuppressionHelp", language: localLanguage))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Toggle("System audio capture", isOn: $systemAudioCaptureEnabled)
-                Text("Captures system/app playback with ScreenCaptureKit and mixes it into the meeting recording when the meeting ends. macOS may ask for Screen Recording permission.")
+                Toggle(AppText.t("systemAudioCapture", language: localLanguage), isOn: $systemAudioCaptureEnabled)
+                Text(AppText.t("systemAudioCaptureHelp", language: localLanguage))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -162,36 +173,36 @@ struct SettingsView: View {
 
     private var realtimeModelSettings: some View {
         Form {
-            Section("ASR Provider") {
-                Picker("Realtime ASR", selection: $realtimeASRProvider) {
+            Section(AppText.t("asrProvider", language: localLanguage)) {
+                Picker(AppText.t("realtimeASR", language: localLanguage), selection: $realtimeASRProvider) {
                     ForEach(RealtimeASRProvider.allCases) { provider in
                         Text(provider.rawValue).tag(provider.rawValue)
                     }
                 }
-                TextField("ASR Model", text: $realtimeASRModel)
-                SecureField("ASR API Key", text: $realtimeASRAPIKey)
-                Text("Recommended for meetings: `fun-asr-realtime` with 16 kHz PCM. Use `paraformer-realtime-8k-v2` only for 8 kHz telephone-style Chinese audio.")
+                TextField(AppText.t("asrModel", language: localLanguage), text: $realtimeASRModel)
+                SecureField(AppText.t("asrAPIKey", language: localLanguage), text: $realtimeASRAPIKey)
+                Text(AppText.t("asrHelp", language: localLanguage))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Text Model Provider") {
-                Picker("LLM Provider", selection: $provider) {
+            Section(AppText.t("textModelProvider", language: localLanguage)) {
+                Picker(AppText.t("llmProvider", language: localLanguage), selection: $provider) {
                     ForEach(ModelProvider.allCases) { provider in
                         Text(provider.rawValue).tag(provider.rawValue)
                     }
                 }
 
-                TextField("API Base URL", text: $apiBaseURL)
-                SecureField("LLM API Key", text: $apiKey)
-                Picker("Local Language", selection: $localLanguage) {
+                TextField(AppText.t("apiBaseURL", language: localLanguage), text: $apiBaseURL)
+                SecureField(AppText.t("llmAPIKey", language: localLanguage), text: $apiKey)
+                Picker(AppText.t("localLanguage", language: localLanguage), selection: $localLanguage) {
                     ForEach(LocalMeetingLanguage.allCases) { language in
                         Text(language.label).tag(language.rawValue)
                     }
                 }
-                TextField("Translation Model", text: $translationModel)
-                TextField("Summary Model", text: $summaryModel)
-                Text("Used for realtime translation and meeting summaries. Alibaba Cloud Bailian is OpenAI-compatible; use `https://dashscope.aliyuncs.com/compatible-mode/v1` with models such as `qwen-mt-turbo`.")
+                TextField(AppText.t("translationModel", language: localLanguage), text: $translationModel)
+                TextField(AppText.t("summaryModel", language: localLanguage), text: $summaryModel)
+                Text(AppText.t("textModelHelp", language: localLanguage))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -201,19 +212,19 @@ struct SettingsView: View {
 
     private var chatAgentSettings: some View {
         Form {
-            Section("WorkAgent Service") {
-                Toggle("Enable Meeting Agent", isOn: $chatAgentEnabled)
-                Picker("Scheme", selection: $chatAgentScheme) {
+            Section(AppText.t("workAgentService", language: localLanguage)) {
+                Toggle(AppText.t("enableMeetingAgent", language: localLanguage), isOn: $chatAgentEnabled)
+                Picker(AppText.t("scheme", language: localLanguage), selection: $chatAgentScheme) {
                     Text("http").tag("http")
                     Text("https").tag("https")
                 }
-                TextField("Address", text: $chatAgentHost)
+                TextField(AppText.t("address", language: localLanguage), text: $chatAgentHost)
                     .textContentType(.URL)
-                TextField("Port", value: $chatAgentPort, formatter: Self.portFormatter)
-                TextField("Base Path", text: $chatAgentBasePath)
-                SecureField("Token", text: $chatAgentAuthToken)
+                TextField(AppText.t("port", language: localLanguage), value: $chatAgentPort, formatter: Self.portFormatter)
+                TextField(AppText.t("basePath", language: localLanguage), text: $chatAgentBasePath)
+                SecureField(AppText.t("token", language: localLanguage), text: $chatAgentAuthToken)
 
-                Text("PowerMeetings will call \(normalizedChatStreamURL) with `Authorization: Bearer <token>`, matching WorkAgent WebUI's `BASE_PATH + /api/agent/chat/stream` contract.")
+                Text(String(format: AppText.t("chatAgentHelp", language: localLanguage), normalizedChatStreamURL))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -225,12 +236,12 @@ struct SettingsView: View {
         HStack {
             Spacer()
 
-            Button("Close") {
+            Button(AppText.t("close", language: localLanguage)) {
                 dismiss()
             }
             .keyboardShortcut(.cancelAction)
 
-            Button("Save") {
+            Button(AppText.t("save", language: localLanguage)) {
                 saveDraftValues()
                 dismiss()
             }
@@ -280,20 +291,22 @@ struct SettingsView: View {
     private var speechAuthorizationLabel: String {
         switch speechAuthorizationStatus {
         case .authorized:
-            "Authorized"
+            AppText.t("authorized", language: localLanguage)
         case .notDetermined:
-            "Not Authorized"
+            AppText.t("notAuthorized", language: localLanguage)
         case .denied:
-            "Denied"
+            AppText.t("denied", language: localLanguage)
         case .restricted:
-            "Restricted"
+            AppText.t("restricted", language: localLanguage)
         @unknown default:
-            "Unknown"
+            AppText.t("unknown", language: localLanguage)
         }
     }
 
     private var speechAuthorizationButtonTitle: String {
-        speechAuthorizationStatus == .notDetermined ? "Request Access" : "Open System Settings"
+        speechAuthorizationStatus == .notDetermined
+            ? AppText.t("requestAccess", language: localLanguage)
+            : AppText.t("openSystemSettings", language: localLanguage)
     }
 
     private var speechAuthorizationColor: Color {
@@ -320,12 +333,12 @@ struct SettingsView: View {
 
         if speechAuthorizationStatus == .notDetermined {
             isRequestingSpeechAuthorization = true
-            speechAuthorizationMessage = "Requesting Speech Recognition access. If macOS does not show a prompt, open System Settings and enable PowerMeetings manually."
+            speechAuthorizationMessage = AppText.t("speechRequesting", language: localLanguage)
 
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(2))
                 if isRequestingSpeechAuthorization {
-                    speechAuthorizationMessage = "Still waiting for macOS Speech Recognition. If no prompt appeared, use Open System Settings and enable PowerMeetings under Privacy & Security > Speech Recognition."
+                    speechAuthorizationMessage = AppText.t("speechWaiting", language: localLanguage)
                 }
             }
 
@@ -345,15 +358,15 @@ struct SettingsView: View {
     private func speechAuthorizationMessage(for status: SFSpeechRecognizerAuthorizationStatus) -> String {
         switch status {
         case .authorized:
-            "Speech Recognition is authorized. Live transcription can run locally."
+            AppText.t("speechAuthorized", language: localLanguage)
         case .notDetermined:
-            "macOS has not shown the Speech Recognition prompt yet."
+            AppText.t("speechNotDetermined", language: localLanguage)
         case .denied:
-            "Speech Recognition was denied. Enable it in System Settings to use live transcription."
+            AppText.t("speechDenied", language: localLanguage)
         case .restricted:
-            "Speech Recognition is restricted on this Mac."
+            AppText.t("speechRestricted", language: localLanguage)
         @unknown default:
-            "Speech Recognition status is unknown."
+            AppText.t("speechUnknown", language: localLanguage)
         }
     }
 

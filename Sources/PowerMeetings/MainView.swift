@@ -39,7 +39,7 @@ struct MainView: View {
                 Button {
                     isShowingSettings = true
                 } label: {
-                    Label("Settings", systemImage: "gearshape")
+                    Label(AppText.t("settings", language: modelSettings.localLanguage), systemImage: "gearshape")
                 }
             }
         }

@@ -18,9 +18,9 @@ enum ChatAgentError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .invalidURL(url):
-            "Invalid Chat Agent URL: \(url)"
+            "Invalid Meeting Agent URL: \(url)"
         case let .badStatus(status, url):
-            "Chat Agent request failed with HTTP \(status): \(url)"
+            "Meeting Agent request failed with HTTP \(status): \(url)"
         case let .agentError(message):
             message
         }
@@ -247,7 +247,7 @@ struct ChatAgentClient {
                 await onEvent(.status(summary))
             }
         case "error":
-            throw ChatAgentError.agentError(object["content"] as? String ?? "Unknown Chat Agent error.")
+            throw ChatAgentError.agentError(object["content"] as? String ?? "Unknown Meeting Agent error.")
         case "interrupted":
             await onEvent(.chunk("\n\n*Task interrupted.*"))
             await onEvent(.done)

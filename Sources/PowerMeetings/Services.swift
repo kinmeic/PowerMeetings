@@ -187,7 +187,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
     private var converter: AVAudioConverter?
     private var outputFormat: AVAudioFormat?
     private var isStoppingIntentionally = false
-    private var fallbackLanguageID = LocalMeetingLanguage.mandarinChinese.rawValue
+    private let fallbackLanguageID = "auto"
 
     func start(
         configuration: ModelConfiguration,
@@ -228,8 +228,6 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
         isTaskStarted = false
         isStoppingIntentionally = false
         pendingAudioChunks = []
-        fallbackLanguageID = configuration.localLanguage
-
         var request = URLRequest(url: URL(string: "wss://dashscope.aliyuncs.com/api-ws/v1/inference")!)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("PowerMeetings/0.1.0", forHTTPHeaderField: "user-agent")
@@ -247,7 +245,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
     }
 
     private func sendRunTask(model: String, sampleRate: Int) {
-        var parameters: [String: Any] = [
+        let parameters: [String: Any] = [
             "format": "pcm",
             "sample_rate": sampleRate,
             "disfluency_removal_enabled": false,
@@ -256,9 +254,6 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
             "max_sentence_silence": 1500,
             "heartbeat": true
         ]
-        if model == "paraformer-realtime-v2" || model.hasPrefix("fun-asr-realtime") {
-            parameters["language_hints"] = ["zh", "en"]
-        }
 
         let message: [String: Any] = [
             "header": [
@@ -403,7 +398,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
                   (sentence["heartbeat"] as? Bool) != true,
                   let text = sentence["text"] as? String else { return }
             let isFinal = sentence["sentence_end"] as? Bool ?? false
-            onTranscript(text, languageID(from: sentence, output: output, payload: payload), isFinal)
+            onTranscript(text, languageID(from: sentence, output: output, payload: payload, text: text), isFinal)
         case "task-failed":
             let message = header["error_message"] as? String ?? "Unknown Paraformer task failure."
             isStoppingIntentionally = true
@@ -422,10 +417,11 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
     private func languageID(
         from sentence: [String: Any],
         output: [String: Any],
-        payload: [String: Any]
+        payload: [String: Any],
+        text: String
     ) -> String {
         let candidate = firstLanguageValue(in: [sentence, output, payload])
-        return normalizedLanguageID(candidate) ?? fallbackLanguageID
+        return normalizedLanguageID(candidate) ?? inferredLanguageID(for: text) ?? fallbackLanguageID
     }
 
     private func firstLanguageValue(in objects: [[String: Any]]) -> String? {
@@ -433,6 +429,12 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
             "language",
             "language_code",
             "language_id",
+            "languageCode",
+            "languageId",
+            "language_type",
+            "languageType",
+            "detected_language",
+            "detectedLanguage",
             "lang",
             "locale"
         ]
@@ -467,6 +469,22 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
             return LocalMeetingLanguage.english.rawValue
         }
         return normalized
+    }
+
+    private func inferredLanguageID(for text: String) -> String? {
+        let scalars = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+        guard scalars.isEmpty == false else { return nil }
+        let cjkCount = scalars.filter { (0x4E00...0x9FFF).contains(Int($0.value)) }.count
+        let latinCount = scalars.filter {
+            CharacterSet.alphanumerics.contains($0) && (0x0000...0x024F).contains(Int($0.value))
+        }.count
+        if latinCount >= max(3, cjkCount * 2) {
+            return LocalMeetingLanguage.english.rawValue
+        }
+        if cjkCount >= max(2, latinCount) {
+            return LocalMeetingLanguage.mandarinChinese.rawValue
+        }
+        return nil
     }
 
     private func stopOnQueue() {
@@ -1569,6 +1587,7 @@ final class MeetingSessionViewModel: ObservableObject {
     private var appendSegment: (@MainActor (TranscriptSegment) -> Void)?
     private var updateSegmentTranslation: (@MainActor (TranscriptSegment.ID, String) -> Void)?
     private var updateSegment: (@MainActor (TranscriptSegment.ID, String, String, String) -> Void)?
+    private var appendLog: (@MainActor (MeetingLogEntry) -> Void)?
     private var speechTranscriber: LiveSpeechTranscriber?
     private var paraformerTranscriber: AliyunParaformerTranscriber?
     private var lastEmittedTranscripts: [String: String] = [:]
@@ -1586,7 +1605,8 @@ final class MeetingSessionViewModel: ObservableObject {
         configuration: ModelConfiguration,
         append: @escaping @MainActor (TranscriptSegment) -> Void,
         updateSegment: @escaping @MainActor (TranscriptSegment.ID, String, String, String) -> Void,
-        updateTranslation: @escaping @MainActor (TranscriptSegment.ID, String) -> Void
+        updateTranslation: @escaping @MainActor (TranscriptSegment.ID, String) -> Void,
+        appendLog: @escaping @MainActor (MeetingLogEntry) -> Void
     ) {
         stopDemoTranscript()
         modelConfiguration = configuration
@@ -1595,6 +1615,7 @@ final class MeetingSessionViewModel: ObservableObject {
         appendSegment = append
         self.updateSegment = updateSegment
         updateSegmentTranslation = updateTranslation
+        self.appendLog = appendLog
         startSpeechRecognition()
     }
 
@@ -1639,6 +1660,7 @@ final class MeetingSessionViewModel: ObservableObject {
         appendSegment = nil
         updateSegment = nil
         updateSegmentTranslation = nil
+        appendLog = nil
     }
 
     private func startSpeechRecognition() {
@@ -1668,7 +1690,7 @@ final class MeetingSessionViewModel: ObservableObject {
             },
             onStatus: { [weak self] status in
                 Task { @MainActor in
-                    self?.appendSpeechUnavailableSegment(reason: status)
+                    self?.appendMeetingLog(status)
                 }
             },
             onUnavailable: { [weak self] reason in
@@ -1676,7 +1698,7 @@ final class MeetingSessionViewModel: ObservableObject {
                     guard let self else { return }
                     self.paraformerTranscriber?.stop()
                     self.paraformerTranscriber = nil
-                    self.appendSpeechUnavailableSegment(reason: reason)
+                    self.appendMeetingLog(reason, level: "warning")
                     if SpeechAuthorizationBridge.currentStatus == .authorized {
                         self.startMacOSSpeechRecognition()
                     }
@@ -1704,7 +1726,7 @@ final class MeetingSessionViewModel: ObservableObject {
             },
             onUnavailable: { [weak self] reason in
                 Task { @MainActor in
-                    self?.appendSpeechUnavailableSegment(reason: reason)
+                    self?.appendMeetingLog(reason, level: "warning")
                 }
             }
         )
@@ -1769,9 +1791,7 @@ final class MeetingSessionViewModel: ObservableObject {
         let timestamp = TimeInterval(demoIndex * 8)
         demoIndex += 1
         let localLanguage = modelConfiguration.localLanguage
-        let hasTranslationConfiguration = modelConfiguration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            && modelConfiguration.translationModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-        let shouldTranslate = languageID != localLanguage && hasTranslationConfiguration
+        let shouldTranslate = shouldTranslateFinalTranscript(languageID: languageID, localLanguage: localLanguage)
 
         if shouldReviseLastCommittedTranscript(with: delta),
            let lastCommittedSegmentID,
@@ -1836,6 +1856,38 @@ final class MeetingSessionViewModel: ObservableObject {
         }
     }
 
+    private func shouldTranslateFinalTranscript(languageID: String, localLanguage: String) -> Bool {
+        guard isTranslationModelConfigured else { return false }
+        return languageFamily(for: languageID) != languageFamily(for: localLanguage)
+    }
+
+    private var isTranslationModelConfigured: Bool {
+        let translationModel = modelConfiguration.translationModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard translationModel.isEmpty == false else { return false }
+        if modelConfiguration.provider == ModelProvider.ollama.rawValue ||
+            modelConfiguration.provider == ModelProvider.lmStudio.rawValue {
+            return true
+        }
+        return modelConfiguration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private func languageFamily(for languageID: String) -> String {
+        let normalized = languageID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased()
+        if normalized == "auto" || normalized == "unknown" {
+            return "auto"
+        }
+        if normalized.hasPrefix("zh") || normalized == "chinese" || normalized == "mandarin" {
+            return "zh"
+        }
+        if normalized.hasPrefix("en") || normalized == "english" {
+            return "en"
+        }
+        return normalized
+    }
+
     private func shouldReviseLastCommittedTranscript(with transcript: String) -> Bool {
         guard let lastCommittedAt,
               Date().timeIntervalSince(lastCommittedAt) < 12,
@@ -1846,6 +1898,8 @@ final class MeetingSessionViewModel: ObservableObject {
         return normalizedNew.contains(normalizedLast)
             || normalizedLast.contains(normalizedNew)
             || overlapRatio(normalizedNew, normalizedLast) >= 0.62
+            || longestCommonSubsequenceRatio(normalizedNew, normalizedLast) >= 0.72
+            || tokenOverlapRatio(transcript, lastCommittedTranscript) >= 0.58
     }
 
     private func normalizedTranscriptForOverlap(_ text: String) -> String {
@@ -1870,6 +1924,46 @@ final class MeetingSessionViewModel: ObservableObject {
             best = max(best, length)
         }
         return Double(best) / Double(shorter.count)
+    }
+
+    private func longestCommonSubsequenceRatio(_ lhs: String, _ rhs: String) -> Double {
+        guard lhs.isEmpty == false, rhs.isEmpty == false else { return 0 }
+        let lhsChars = Array(lhs)
+        let rhsChars = Array(rhs)
+        var previous = Array(repeating: 0, count: rhsChars.count + 1)
+        var current = previous
+
+        for lhsIndex in lhsChars.indices {
+            current[0] = 0
+            for rhsIndex in rhsChars.indices {
+                if lhsChars[lhsIndex] == rhsChars[rhsIndex] {
+                    current[rhsIndex + 1] = previous[rhsIndex] + 1
+                } else {
+                    current[rhsIndex + 1] = max(previous[rhsIndex + 1], current[rhsIndex])
+                }
+            }
+            swap(&previous, &current)
+        }
+
+        let shorterLength = min(lhsChars.count, rhsChars.count)
+        guard shorterLength > 0 else { return 0 }
+        return Double(previous[rhsChars.count]) / Double(shorterLength)
+    }
+
+    private func tokenOverlapRatio(_ lhs: String, _ rhs: String) -> Double {
+        let lhsTokens = Set(transcriptTokens(lhs))
+        let rhsTokens = Set(transcriptTokens(rhs))
+        guard lhsTokens.isEmpty == false, rhsTokens.isEmpty == false else { return 0 }
+        let shared = lhsTokens.intersection(rhsTokens).count
+        return Double(shared) / Double(min(lhsTokens.count, rhsTokens.count))
+    }
+
+    private func transcriptTokens(_ text: String) -> [String] {
+        text
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 2 }
     }
 
     private func flushAllPendingTranscripts() {
@@ -1919,19 +2013,9 @@ final class MeetingSessionViewModel: ObservableObject {
         return [localLanguage] + alternatives
     }
 
-    private func appendSpeechUnavailableSegment(reason: String) {
-        guard let activeMeetingID, let appendSegment else { return }
-        appendSegment(
-            TranscriptSegment(
-                meetingID: activeMeetingID,
-                timestamp: 0,
-                speaker: "System",
-                sourceText: reason,
-                translatedText: reason,
-                kind: .transcript,
-                confidence: 1
-            )
-        )
+    private func appendMeetingLog(_ message: String, level: String = "info") {
+        guard let activeMeetingID, let appendLog else { return }
+        appendLog(MeetingLogEntry(meetingID: activeMeetingID, message: message, level: level))
     }
 
     private func stopSpeechRecognition(keepSession: Bool) {
@@ -1955,7 +2039,10 @@ final class MeetingSessionViewModel: ObservableObject {
     }
 
     private func languageLabel(for languageID: String) -> String {
-        LocalMeetingLanguage(rawValue: languageID)?.label ?? languageID
+        if languageID == "auto" {
+            return "Auto"
+        }
+        return LocalMeetingLanguage(rawValue: languageID)?.label ?? languageID
     }
 }
 
@@ -1996,18 +2083,15 @@ struct MeetingAIClient {
         let transcript = segments
             .map { segment in
                 let source = segment.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-                let translated = segment.translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if translated.isEmpty || translated == source {
-                    return "[\(segment.timestamp.clockString)] \(segment.speaker): \(source)"
-                }
-                return "[\(segment.timestamp.clockString)] \(segment.speaker): \(source)\nTranslation: \(translated)"
+                return "[\(segment.timestamp.clockString)] \(segment.speaker): \(source)"
             }
             .joined(separator: "\n\n")
         let participantList = participants.map(\.name).joined(separator: ", ")
         let localLanguage = LocalMeetingLanguage(rawValue: configuration.localLanguage) ?? .mandarinChinese
         let prompt = """
         Generate concise meeting minutes in Markdown.
-        Output language: \(localLanguage.translationTarget).
+        Output language: \(localLanguage.translationTarget). You must write every section in \(localLanguage.translationTarget).
+        Use only the original transcript text as source context. Do not use translated transcript text even if it exists in the UI.
         Return raw Markdown only. Do not wrap the result in triple backticks or a code block.
 
         Meeting: \(meeting.title)
@@ -2027,7 +2111,7 @@ struct MeetingAIClient {
         let request = ChatCompletionRequest(
             model: summaryModel,
             messages: [
-                .init(role: "system", content: "You are a precise meeting minutes assistant. Always write the final minutes in \(localLanguage.translationTarget). Return raw Markdown only, never fenced code blocks."),
+                .init(role: "system", content: "You are a precise meeting minutes assistant. Use only original transcript text as source context. Always write the final minutes entirely in \(localLanguage.translationTarget). Return raw Markdown only, never fenced code blocks."),
                 .init(role: "user", content: prompt)
             ],
             temperature: 0.2
@@ -2056,14 +2140,35 @@ struct MeetingAIClient {
 
     func translateText(_ text: String, targetLanguage: String, configuration: ModelConfiguration) async throws -> String? {
         let apiKey = configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard apiKey.isEmpty == false else { return nil }
+        let translationModel = configuration.translationModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard translationModel.isEmpty == false else { return nil }
+        if apiKey.isEmpty,
+           configuration.provider != ModelProvider.ollama.rawValue,
+           configuration.provider != ModelProvider.lmStudio.rawValue {
+            return nil
+        }
+
+        let messages: [ChatCompletionRequest.Message]
+        if translationModel.lowercased().hasPrefix("qwen-mt") {
+            messages = [
+                .init(role: "user", content: """
+                Translate the following meeting transcript into \(targetLanguage).
+                If the source text is already in \(targetLanguage), return exactly __NO_TRANSLATION__.
+                Return only the translation or that sentinel.
+
+                \(text)
+                """)
+            ]
+        } else {
+            messages = [
+                .init(role: "system", content: "Translate the user's meeting transcript into \(targetLanguage). If the source text is already in \(targetLanguage), return exactly __NO_TRANSLATION__. Return only the translation or that sentinel."),
+                .init(role: "user", content: text)
+            ]
+        }
 
         let request = ChatCompletionRequest(
-            model: configuration.translationModel,
-            messages: [
-                .init(role: "system", content: "Translate the user's meeting transcript into \(targetLanguage). Return only the translation."),
-                .init(role: "user", content: text)
-            ],
+            model: translationModel,
+            messages: messages,
             temperature: 0.1
         )
 
@@ -2075,7 +2180,9 @@ struct MeetingAIClient {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if apiKey.isEmpty == false {
+            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         urlRequest.httpBody = try JSONEncoder().encode(request)
 
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
@@ -2085,6 +2192,11 @@ struct MeetingAIClient {
         }
 
         let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
-        return decoded.choices.first?.message.content
+        let translated = decoded.choices.first?.message.content
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if translated == "__NO_TRANSLATION__" {
+            return nil
+        }
+        return translated
     }
 }

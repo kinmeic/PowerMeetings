@@ -6,6 +6,7 @@ final class MeetingStore: ObservableObject {
     @Published var meetings: [Meeting] = []
     @Published var selectedMeetingID: Meeting.ID?
     @Published var segments: [TranscriptSegment] = []
+    @Published var logs: [MeetingLogEntry] = []
     @Published private var agentMessagesByMeeting: [Meeting.ID: [AgentMessage]] = [:]
     @Published private var agentConversationIDs: [Meeting.ID: String] = [:]
 
@@ -13,8 +14,35 @@ final class MeetingStore: ObservableObject {
         var meetings: [Meeting]
         var selectedMeetingID: Meeting.ID?
         var segments: [TranscriptSegment]
+        var logs: [MeetingLogEntry]
         var agentMessagesByMeeting: [Meeting.ID: [AgentMessage]]
         var agentConversationIDs: [Meeting.ID: String]
+
+        init(
+            meetings: [Meeting],
+            selectedMeetingID: Meeting.ID?,
+            segments: [TranscriptSegment],
+            logs: [MeetingLogEntry],
+            agentMessagesByMeeting: [Meeting.ID: [AgentMessage]],
+            agentConversationIDs: [Meeting.ID: String]
+        ) {
+            self.meetings = meetings
+            self.selectedMeetingID = selectedMeetingID
+            self.segments = segments
+            self.logs = logs
+            self.agentMessagesByMeeting = agentMessagesByMeeting
+            self.agentConversationIDs = agentConversationIDs
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            meetings = try container.decode([Meeting].self, forKey: .meetings)
+            selectedMeetingID = try container.decodeIfPresent(Meeting.ID.self, forKey: .selectedMeetingID)
+            segments = try container.decode([TranscriptSegment].self, forKey: .segments)
+            logs = try container.decodeIfPresent([MeetingLogEntry].self, forKey: .logs) ?? []
+            agentMessagesByMeeting = try container.decode([Meeting.ID: [AgentMessage]].self, forKey: .agentMessagesByMeeting)
+            agentConversationIDs = try container.decode([Meeting.ID: String].self, forKey: .agentConversationIDs)
+        }
     }
 
     init() {
@@ -29,6 +57,11 @@ final class MeetingStore: ObservableObject {
     var selectedMeetingSegments: [TranscriptSegment] {
         guard let meetingID = selectedMeeting?.id else { return [] }
         return segments.filter { $0.meetingID == meetingID }
+    }
+
+    var selectedMeetingLogs: [MeetingLogEntry] {
+        guard let meetingID = selectedMeeting?.id else { return [] }
+        return logs.filter { $0.meetingID == meetingID }
     }
 
     var selectedMeetingAgentMessages: [AgentMessage] {
@@ -107,6 +140,7 @@ final class MeetingStore: ObservableObject {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
         meetings.remove(at: index)
         segments.removeAll { $0.meetingID == id }
+        logs.removeAll { $0.meetingID == id }
         agentMessagesByMeeting.removeValue(forKey: id)
         agentConversationIDs.removeValue(forKey: id)
 
@@ -159,6 +193,11 @@ final class MeetingStore: ObservableObject {
 
     func appendSegment(_ segment: TranscriptSegment) {
         segments.append(segment)
+        save()
+    }
+
+    func appendLog(_ entry: MeetingLogEntry) {
+        logs.append(entry)
         save()
     }
 
@@ -261,6 +300,7 @@ final class MeetingStore: ObservableObject {
         meetings = state.meetings
         selectedMeetingID = state.selectedMeetingID
         segments = state.segments
+        logs = state.logs
         agentMessagesByMeeting = state.agentMessagesByMeeting
         agentConversationIDs = state.agentConversationIDs
     }
@@ -270,6 +310,7 @@ final class MeetingStore: ObservableObject {
             meetings: meetings,
             selectedMeetingID: selectedMeetingID,
             segments: segments,
+            logs: logs,
             agentMessagesByMeeting: agentMessagesByMeeting,
             agentConversationIDs: agentConversationIDs
         )

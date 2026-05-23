@@ -44,6 +44,14 @@ struct TranscriptSegment: Identifiable, Hashable, Codable {
     var confidence: Double
 }
 
+struct MeetingLogEntry: Identifiable, Hashable, Codable {
+    var id = UUID()
+    var meetingID: UUID
+    var createdAt = Date()
+    var message: String
+    var level: String = "info"
+}
+
 struct AgentMessage: Identifiable, Hashable, Codable {
     enum Sender: String, Codable {
         case user

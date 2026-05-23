@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MeetingListView: View {
     @EnvironmentObject private var meetingStore: MeetingStore
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
     @State private var searchText = ""
     @State private var editingMeetingID: Meeting.ID?
     @State private var draftTitle = ""
@@ -28,6 +29,7 @@ struct MeetingListView: View {
                             isSelected: meeting.id == meetingStore.selectedMeeting?.id,
                             isEditing: editingMeetingID == meeting.id,
                             draftTitle: bindingForDraftTitle(meetingID: meeting.id),
+                            language: modelSettings.localLanguage,
                             focusedRenameID: $focusedRenameID,
                             onCommitRename: { commitRename(for: meeting.id) },
                             onCancelRename: cancelRename
@@ -41,12 +43,12 @@ struct MeetingListView: View {
                             Button {
                                 beginRename(meeting)
                             } label: {
-                                Label("Rename Meeting", systemImage: "pencil")
+                                Label(AppText.t("renameMeeting", language: modelSettings.localLanguage), systemImage: "pencil")
                             }
                             Button(role: .destructive) {
                                 meetingStore.deleteMeeting(id: meeting.id)
                             } label: {
-                                Label("Delete Meeting", systemImage: "trash")
+                                Label(AppText.t("deleteMeeting", language: modelSettings.localLanguage), systemImage: "trash")
                             }
                         }
                     }
@@ -59,7 +61,7 @@ struct MeetingListView: View {
 
     private var searchField: some View {
         HStack(spacing: 8) {
-            TextField("Search meetings", text: $searchText)
+            TextField(AppText.t("searchMeetings", language: modelSettings.localLanguage), text: $searchText)
                 .textFieldStyle(.plain)
 
             if searchText.isEmpty == false {
@@ -70,7 +72,7 @@ struct MeetingListView: View {
                         .foregroundStyle(AppTheme.muted.opacity(0.7))
                 }
                 .buttonStyle(.plain)
-                .help("Clear search")
+                .help(AppText.t("clearSearch", language: modelSettings.localLanguage))
             }
         }
         .padding(.horizontal, 14)
@@ -84,7 +86,7 @@ struct MeetingListView: View {
                 Text("PowerMeetings")
                     .font(.system(.title2, design: .serif, weight: .bold))
                     .foregroundStyle(AppTheme.ink)
-                Text("Live memory for serious meetings")
+                Text(AppText.t("tagline", language: modelSettings.localLanguage))
                     .font(.caption)
                     .foregroundStyle(AppTheme.muted)
             }
@@ -142,6 +144,7 @@ private struct MeetingRowView: View {
     let isSelected: Bool
     let isEditing: Bool
     @Binding var draftTitle: String
+    let language: String
     var focusedRenameID: FocusState<Meeting.ID?>.Binding
     let onCommitRename: () -> Void
     let onCancelRename: () -> Void
@@ -157,7 +160,7 @@ private struct MeetingRowView: View {
             }
 
             if isEditing {
-                TextField("Meeting name", text: $draftTitle)
+                TextField(AppText.t("meetingName", language: language), text: $draftTitle)
                     .textFieldStyle(.plain)
                     .font(.system(.headline, design: .rounded, weight: .semibold))
                     .foregroundStyle(AppTheme.ink)
@@ -185,7 +188,7 @@ private struct MeetingRowView: View {
     }
 
     private var statusPill: some View {
-        Text(meeting.status.rawValue)
+        Text(meeting.status.localizedTitle(language: language))
             .font(.caption.bold())
             .padding(.horizontal, 10)
             .padding(.vertical, 5)

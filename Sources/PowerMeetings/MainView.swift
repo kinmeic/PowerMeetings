@@ -47,7 +47,14 @@ struct MainView: View {
             SettingsView()
                 .frame(width: 720, height: 560)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .powerMeetingsOpenSettings)) { _ in
+            isShowingSettings = true
+        }
     }
+}
+
+extension Notification.Name {
+    static let powerMeetingsOpenSettings = Notification.Name("PowerMeetingsOpenSettings")
 }
 
 #if os(macOS)

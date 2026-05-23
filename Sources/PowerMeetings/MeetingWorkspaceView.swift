@@ -35,6 +35,14 @@ struct MeetingWorkspaceView: View {
                     onExport: { exportRecording() }
                 )
 
+                if let issue = currentStatusIssue(for: meeting) {
+                    MeetingStatusBanner(
+                        issue: issue,
+                        onOpenSettings: openSettings,
+                        onViewLogs: { selectedTab = "Log" }
+                    )
+                }
+
                 Picker("", selection: $selectedTab) {
                     Text(AppText.t("live", language: modelSettings.localLanguage)).tag("Live")
                     Text(AppText.t("people", language: modelSettings.localLanguage)).tag("People")
@@ -75,12 +83,24 @@ struct MeetingWorkspaceView: View {
 
     private func startMeeting(meeting: Meeting) {
         guard meetingStore.canStartMeeting(id: meeting.id) else { return }
+        audioEngine.onEvent = { message, level in
+            meetingStore.appendLog(MeetingLogEntry(meetingID: meeting.id, message: message, level: level))
+        }
         let settings = AudioCaptureSettings(
             inputDeviceID: audioDeviceManager.selectedDeviceID,
             enableSystemAudio: modelSettings.systemAudioCaptureEnabled,
             enableNoiseSuppression: modelSettings.noiseSuppressionEnabled
         )
-        guard audioEngine.start(settings: settings, meetingID: meeting.id) else { return }
+        guard audioEngine.start(settings: settings, meetingID: meeting.id) else {
+            meetingStore.appendLog(
+                MeetingLogEntry(
+                    meetingID: meeting.id,
+                    message: audioEngine.failureMessage ?? "Recording could not start.",
+                    level: "error"
+                )
+            )
+            return
+        }
         session.startLiveTranscription(
             for: meeting.id,
             configuration: modelSettings.configuration,
@@ -220,6 +240,195 @@ struct MeetingWorkspaceView: View {
                     isTranscribingRecording = false
                 }
             }
+        }
+    }
+
+    private func openSettings() {
+        NotificationCenter.default.post(name: .powerMeetingsOpenSettings, object: nil)
+    }
+
+    private func currentStatusIssue(for meeting: Meeting) -> MeetingStatusIssue? {
+        if let failureMessage = audioEngine.failureMessage {
+            return MeetingStatusIssue(
+                severity: .critical,
+                title: AppText.t("statusNeedsAttention", language: modelSettings.localLanguage),
+                message: "\(AppText.t("microphoneIssue", language: modelSettings.localLanguage)) \(failureMessage)",
+                showSettingsAction: true,
+                showLogAction: true
+            )
+        }
+
+        let warningLogs = meetingStore.selectedMeetingLogs
+            .filter(\.isWarningOrError)
+            .sorted { $0.createdAt > $1.createdAt }
+        if let systemAudioWarning = warningLogs.first(where: { $0.message.localizedCaseInsensitiveContains("system audio") }) {
+            return MeetingStatusIssue(
+                severity: .warning,
+                title: AppText.t("statusDegraded", language: modelSettings.localLanguage),
+                message: "\(AppText.t("systemAudioIssue", language: modelSettings.localLanguage)) \(systemAudioWarning.message)",
+                showSettingsAction: false,
+                showLogAction: true
+            )
+        }
+
+        if meeting.status == .inProgress || meeting.status == .paused {
+            if realtimeASRNeedsConfiguration {
+                return MeetingStatusIssue(
+                    severity: .warning,
+                    title: AppText.t("statusDegraded", language: modelSettings.localLanguage),
+                    message: "\(AppText.t("asrConfigIssue", language: modelSettings.localLanguage)) \(AppText.t("recordingSafe", language: modelSettings.localLanguage))",
+                    showSettingsAction: true,
+                    showLogAction: false
+                )
+            }
+
+            if macOSSpeechNeedsAuthorization {
+                return MeetingStatusIssue(
+                    severity: .warning,
+                    title: AppText.t("statusDegraded", language: modelSettings.localLanguage),
+                    message: "\(AppText.t("speechPermissionIssue", language: modelSettings.localLanguage)) \(AppText.t("recordingSafe", language: modelSettings.localLanguage))",
+                    showSettingsAction: true,
+                    showLogAction: true
+                )
+            }
+
+            if translationNeedsConfiguration {
+                return MeetingStatusIssue(
+                    severity: .info,
+                    title: AppText.t("statusInfo", language: modelSettings.localLanguage),
+                    message: AppText.t("translationConfigIssue", language: modelSettings.localLanguage),
+                    showSettingsAction: true,
+                    showLogAction: false
+                )
+            }
+        }
+
+        if let latestWarning = warningLogs.first {
+            return MeetingStatusIssue(
+                severity: latestWarning.level.lowercased() == "error" ? .critical : .warning,
+                title: latestWarning.level.lowercased() == "error"
+                    ? AppText.t("statusNeedsAttention", language: modelSettings.localLanguage)
+                    : AppText.t("statusDegraded", language: modelSettings.localLanguage),
+                message: latestWarning.message,
+                showSettingsAction: false,
+                showLogAction: true
+            )
+        }
+
+        return nil
+    }
+
+    private var realtimeASRNeedsConfiguration: Bool {
+        let provider = modelSettings.realtimeASRProvider
+        guard provider == RealtimeASRProvider.aliyunRealtimeASR.rawValue || provider == "Aliyun Paraformer" else {
+            return false
+        }
+        return modelSettings.realtimeASRAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var macOSSpeechNeedsAuthorization: Bool {
+        modelSettings.realtimeASRProvider == RealtimeASRProvider.macOSSpeech.rawValue
+            && SpeechAuthorizationBridge.currentStatus != .authorized
+    }
+
+    private var translationNeedsConfiguration: Bool {
+        let translationModel = modelSettings.translationModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard translationModel.isEmpty == false else { return true }
+        if modelSettings.provider == ModelProvider.ollama.rawValue || modelSettings.provider == ModelProvider.lmStudio.rawValue {
+            return false
+        }
+        return modelSettings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+private struct MeetingStatusIssue: Equatable {
+    enum Severity {
+        case critical
+        case warning
+        case info
+    }
+
+    var severity: Severity
+    var title: String
+    var message: String
+    var showSettingsAction: Bool
+    var showLogAction: Bool
+
+    var icon: String {
+        switch severity {
+        case .critical:
+            "exclamationmark.octagon.fill"
+        case .warning:
+            "exclamationmark.triangle.fill"
+        case .info:
+            "info.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch severity {
+        case .critical:
+            .red
+        case .warning:
+            AppTheme.amber
+        case .info:
+            AppTheme.moss
+        }
+    }
+}
+
+private struct MeetingStatusBanner: View {
+    @EnvironmentObject private var modelSettings: ModelSettingsStore
+    let issue: MeetingStatusIssue
+    let onOpenSettings: () -> Void
+    let onViewLogs: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: issue.icon)
+                .font(.title3)
+                .foregroundStyle(issue.color)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(issue.title)
+                    .font(.callout.bold())
+                    .foregroundStyle(AppTheme.ink)
+                Text(issue.message)
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.muted)
+                    .textSelection(.enabled)
+            }
+
+            Spacer(minLength: 8)
+
+            HStack(spacing: 8) {
+                if issue.showSettingsAction {
+                    Button(AppText.t("openSettings", language: modelSettings.localLanguage), action: onOpenSettings)
+                        .buttonStyle(.borderless)
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(issue.color.opacity(0.14), in: Capsule())
+                        .foregroundStyle(issue.color)
+                }
+
+                if issue.showLogAction {
+                    Button(AppText.t("viewLogs", language: modelSettings.localLanguage), action: onViewLogs)
+                        .buttonStyle(.borderless)
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(.white.opacity(0.72), in: Capsule())
+                        .foregroundStyle(AppTheme.ink)
+                }
+            }
+        }
+        .padding(14)
+        .background(issue.color.opacity(0.09), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(issue.color.opacity(0.18), lineWidth: 1)
         }
     }
 }

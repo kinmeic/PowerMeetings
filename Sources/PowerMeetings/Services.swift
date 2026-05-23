@@ -848,6 +848,7 @@ private final class SystemAudioCaptureEngine: NSObject, @unchecked Sendable {
     private var writerInput: AVAssetWriterInput?
     private var didStartWriting = false
     private(set) var outputURL: URL?
+    var onEvent: (@MainActor (String, String) -> Void)?
 
     func start(in directory: URL) {
         queue.async { [weak self] in
@@ -903,7 +904,10 @@ private final class SystemAudioCaptureEngine: NSObject, @unchecked Sendable {
                 false,
                 onScreenWindowsOnly: true
             )
-            guard let display = content.displays.first else { return }
+            guard let display = content.displays.first else {
+                await emitEvent("System audio capture could not find an active display.", level: "warning")
+                return
+            }
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let configuration = SCStreamConfiguration()
@@ -918,7 +922,14 @@ private final class SystemAudioCaptureEngine: NSObject, @unchecked Sendable {
             try await stream.startCapture()
             self.stream = stream
         } catch {
+            await emitEvent("System audio capture failed: \(error.localizedDescription)", level: "warning")
             finishWriter { _ in }
+        }
+    }
+
+    private func emitEvent(_ message: String, level: String) async {
+        await MainActor.run {
+            onEvent?(message, level)
         }
     }
 
@@ -1016,6 +1027,7 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
     private var accumulatedElapsed: TimeInterval = 0
     private var lastSettings = AudioCaptureSettings()
     var onRecordingReady: (@MainActor (URL, TimeInterval) -> Void)?
+    var onEvent: (@MainActor (String, String) -> Void)?
 
     var isRecording: Bool {
         if case .recording = state { return true }
@@ -1049,6 +1061,7 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
         stop()
         guard MicrophoneAuthorizationBridge.currentStatus == .authorized else {
             state = .failed("Microphone access is not authorized. Grant Microphone access in macOS System Settings.")
+            onEvent?("Microphone access is not authorized. Grant Microphone access in macOS System Settings.", "error")
             return false
         }
 
@@ -1069,10 +1082,12 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
         let url = recordingDirectory.appendingPathComponent("recording-\(UUID().uuidString).m4a")
         if settings.enableNoiseSuppression, startNoiseSuppressingRecorder(url: url) == false {
             noiseSuppressingRecorder = nil
+            onEvent?("Noise suppression could not start. Falling back to standard recording.", "warning")
         }
 
         if noiseSuppressingRecorder == nil, startStandardRecorder(url: url) == false {
             state = .failed("Could not start recording.")
+            onEvent?("Could not start recording.", "error")
             activeMeetingID = nil
             return false
         }
@@ -1220,6 +1235,7 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
             audioPlayer?.play()
         } catch {
             state = .failed("Could not play recording: \(error.localizedDescription)")
+            onEvent?("Could not play recording: \(error.localizedDescription)", "error")
             return
         }
 
@@ -1304,6 +1320,7 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
         guard settings.enableSystemAudio else { return }
         #if canImport(ScreenCaptureKit)
         let capture = SystemAudioCaptureEngine()
+        capture.onEvent = onEvent
         systemAudioCapture = capture
         capture.start(in: recordingDirectory)
         #endif
@@ -1359,6 +1376,7 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
                 }
             } catch {
                 await MainActor.run {
+                    self.onEvent?("System audio could not be mixed into the final recording: \(error.localizedDescription)", "warning")
                     self.isFinalizingRecording = false
                     self.notifyRecordingReadyIfNeeded()
                 }
@@ -1842,16 +1860,22 @@ final class MeetingSessionViewModel: ObservableObject {
     ) {
         guard shouldTranslate, let updateSegmentTranslation else { return }
         Task {
-            guard let translated = try? await MeetingAIClient().translateText(
-                text,
-                targetLanguage: LocalMeetingLanguage(rawValue: localLanguage)?.translationTarget ?? "Chinese (Mandarin, Simplified Chinese)",
-                configuration: modelConfiguration
-            ),
-                  translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
-                  translated != text else { return }
+            do {
+                guard let translated = try await MeetingAIClient().translateText(
+                    text,
+                    targetLanguage: LocalMeetingLanguage(rawValue: localLanguage)?.translationTarget ?? "Chinese (Mandarin, Simplified Chinese)",
+                    configuration: modelConfiguration
+                ),
+                      translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                      translated != text else { return }
 
-            await MainActor.run {
-                updateSegmentTranslation(segmentID, translated)
+                await MainActor.run {
+                    updateSegmentTranslation(segmentID, translated)
+                }
+            } catch {
+                await MainActor.run {
+                    appendMeetingLog("Translation failed: \(error.localizedDescription)", level: "warning")
+                }
             }
         }
     }

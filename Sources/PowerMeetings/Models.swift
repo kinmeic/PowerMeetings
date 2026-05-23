@@ -50,6 +50,11 @@ struct MeetingLogEntry: Identifiable, Hashable, Codable {
     var createdAt = Date()
     var message: String
     var level: String = "info"
+
+    var isWarningOrError: Bool {
+        let normalized = level.lowercased()
+        return normalized == "warning" || normalized == "error"
+    }
 }
 
 struct AgentMessage: Identifiable, Hashable, Codable {

@@ -146,7 +146,18 @@ enum AppText {
         "agentReady": "I am ready to help with this meeting's notes, questions, and follow-up work.",
         "healthCheckingHelp": "Checking Meeting Agent health.",
         "healthOnlineHelp": "Meeting Agent health check is passing.",
-        "healthOfflineHelp": "Meeting Agent health check failed: %@"
+        "healthOfflineHelp": "Meeting Agent health check failed: %@",
+        "statusNeedsAttention": "Needs attention",
+        "statusDegraded": "Degraded",
+        "statusInfo": "Info",
+        "openSettings": "Open Settings",
+        "viewLogs": "View Logs",
+        "microphoneIssue": "Microphone access or recording startup failed. Recording could not begin.",
+        "speechPermissionIssue": "Realtime transcription is unavailable because Speech Recognition is not authorized. Recording can continue normally.",
+        "asrConfigIssue": "Realtime ASR is selected but its API key is missing. Recording can continue, but live transcription may be unavailable.",
+        "translationConfigIssue": "Translation model is not fully configured. Transcripts will still appear; translation will be skipped.",
+        "systemAudioIssue": "System audio capture reported a warning. Microphone recording can continue; check logs for details.",
+        "recordingSafe": "Recording continues safely unless this message says recording could not begin."
     ]
 
     private static let chinese: [String: String] = [
@@ -283,7 +294,18 @@ enum AppText {
         "agentReady": "我已经准备好协助处理这场会议的笔记、问题和后续事项。",
         "healthCheckingHelp": "正在检查会议助手状态。",
         "healthOnlineHelp": "会议助手健康检查正常。",
-        "healthOfflineHelp": "会议助手健康检查失败：%@"
+        "healthOfflineHelp": "会议助手健康检查失败：%@",
+        "statusNeedsAttention": "需要处理",
+        "statusDegraded": "功能降级",
+        "statusInfo": "提示",
+        "openSettings": "打开设置",
+        "viewLogs": "查看日志",
+        "microphoneIssue": "麦克风权限或录音启动失败，录音没有成功开始。",
+        "speechPermissionIssue": "语音识别未授权，实时转写不可用；录音仍可正常继续。",
+        "asrConfigIssue": "已选择实时 ASR，但缺少 API Key。录音会继续，但实时转写可能不可用。",
+        "translationConfigIssue": "翻译模型未完整配置。转写仍会正常显示，翻译会被跳过。",
+        "systemAudioIssue": "系统音频采集出现警告。麦克风录音仍可继续，请查看日志了解详情。",
+        "recordingSafe": "除非提示录音未能开始，否则录音主链路会继续运行。"
     ]
 }
 

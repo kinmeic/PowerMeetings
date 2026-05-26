@@ -42,6 +42,8 @@ struct SettingsView: View {
     @State private var speechAuthorizationStatus = SpeechAuthorizationBridge.currentStatus
     @State private var speechAuthorizationMessage = ""
     @State private var isRequestingSpeechAuthorization = false
+    @State private var isScreenRecordingAuthorized = ScreenCaptureAuthorizationBridge.currentStatus
+    @State private var screenRecordingMessage = ""
     @State private var chatAgentEnabled = true
     @State private var chatAgentScheme = "http"
     @State private var chatAgentHost = ""
@@ -82,6 +84,7 @@ struct SettingsView: View {
             audioDeviceManager.refreshDevices()
             loadDraftValues()
             speechAuthorizationStatus = SpeechAuthorizationBridge.currentStatus
+            isScreenRecordingAuthorized = ScreenCaptureAuthorizationBridge.currentStatus
             audioLevelMonitor.start(deviceID: selectedAudioDeviceID)
         }
         .onDisappear {
@@ -166,6 +169,29 @@ struct SettingsView: View {
                 Text(AppText.t("systemAudioCaptureHelp", language: localLanguage))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if systemAudioCaptureEnabled {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(AppText.t("screenRecordingPermission", language: localLanguage))
+                            Spacer()
+                            Text(isScreenRecordingAuthorized ? AppText.t("screenRecordingAuthorized", language: localLanguage) : AppText.t("screenRecordingNotAuthorized", language: localLanguage))
+                                .font(.caption.bold())
+                                .foregroundStyle(isScreenRecordingAuthorized ? AppTheme.moss : AppTheme.amber)
+                            Button(AppText.t("requestScreenRecording", language: localLanguage)) {
+                                requestScreenRecordingAccess()
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isScreenRecordingAuthorized)
+                            Button(AppText.t("refresh", language: localLanguage)) {
+                                refreshScreenRecordingAuthorizationStatus()
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        Text(screenRecordingMessage.isEmpty ? AppText.t("systemAudioPermissionHelp", language: localLanguage) : screenRecordingMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
@@ -382,6 +408,21 @@ struct SettingsView: View {
             }
         }
         #endif
+    }
+
+    private func refreshScreenRecordingAuthorizationStatus() {
+        isScreenRecordingAuthorized = ScreenCaptureAuthorizationBridge.currentStatus
+        screenRecordingMessage = isScreenRecordingAuthorized
+            ? AppText.t("screenRecordingAuthorized", language: localLanguage)
+            : AppText.t("systemAudioPermissionHelp", language: localLanguage)
+    }
+
+    private func requestScreenRecordingAccess() {
+        let granted = ScreenCaptureAuthorizationBridge.requestAccess()
+        isScreenRecordingAuthorized = ScreenCaptureAuthorizationBridge.currentStatus || granted
+        screenRecordingMessage = isScreenRecordingAuthorized
+            ? AppText.t("screenRecordingAuthorized", language: localLanguage)
+            : AppText.t("systemAudioPermissionHelp", language: localLanguage)
     }
 
     private func saveDraftValues() {

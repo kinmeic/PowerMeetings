@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Combine
+import CoreGraphics
 import Foundation
 import Speech
 #if canImport(ScreenCaptureKit)
@@ -31,6 +32,16 @@ enum MicrophoneAuthorizationBridge {
                 continuation.resume(returning: granted)
             }
         }
+    }
+}
+
+enum ScreenCaptureAuthorizationBridge {
+    nonisolated static var currentStatus: Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    nonisolated static func requestAccess() -> Bool {
+        CGRequestScreenCaptureAccess()
     }
 }
 
@@ -1319,10 +1330,16 @@ final class AudioCaptureEngine: NSObject, ObservableObject, AVAudioRecorderDeleg
     private func startSystemAudioCaptureIfNeeded(settings: AudioCaptureSettings, recordingDirectory: URL) {
         guard settings.enableSystemAudio else { return }
         #if canImport(ScreenCaptureKit)
+        guard ScreenCaptureAuthorizationBridge.currentStatus else {
+            onEvent?("System audio capture is off. Screen Recording permission is required; microphone recording will continue.", "warning")
+            return
+        }
         let capture = SystemAudioCaptureEngine()
         capture.onEvent = onEvent
         systemAudioCapture = capture
         capture.start(in: recordingDirectory)
+        #else
+        onEvent?("System audio capture is unavailable on this macOS build; microphone recording will continue.", "warning")
         #endif
     }
 

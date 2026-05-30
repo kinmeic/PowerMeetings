@@ -54,17 +54,17 @@ jobs:
             RELEASE_NAME="PowerMeetings ${TAG}"
           fi
 
-          PRERELEASE_FLAG=()
-          if [[ "${{ inputs.prerelease }}" == "true" ]]; then
-            PRERELEASE_FLAG=(--prerelease)
-          fi
-
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$ARCHIVE" --clobber
-          else
+          elif [[ "${{ inputs.prerelease }}" == "true" ]]; then
             gh release create "$TAG" "$ARCHIVE" \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_NAME" \
               --notes "Automated macOS build for $TAG." \
-              "${PRERELEASE_FLAG[@]}"
+              --prerelease
+          else
+            gh release create "$TAG" "$ARCHIVE" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_NAME" \
+              --notes "Automated macOS build for $TAG."
           fi

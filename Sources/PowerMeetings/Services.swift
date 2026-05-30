@@ -54,7 +54,7 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
 
     func start(
         languageIDs: [String],
-        onTranscript: @escaping @Sendable (String, String) -> Void,
+        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
         onSilence: @escaping @Sendable () -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
@@ -76,7 +76,7 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
 
     private func startOnQueue(
         languageIDs: [String],
-        onTranscript: @escaping @Sendable (String, String) -> Void,
+        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
         onSilence: @escaping @Sendable () -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
@@ -122,7 +122,7 @@ private final class LiveSpeechTranscriber: @unchecked Sendable {
                     let transcript = result.bestTranscription.formattedString
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     if transcript.isEmpty == false {
-                        onTranscript(transcript, languageID)
+                        onTranscript(transcript, languageID, result.isFinal)
                     }
                 }
 
@@ -202,7 +202,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
 
     func start(
         configuration: ModelConfiguration,
-        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
+        onTranscript: @escaping @Sendable (String, String, Bool, String?) -> Void,
         onStatus: @escaping @Sendable (String) -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
@@ -224,7 +224,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
 
     private func startOnQueue(
         configuration: ModelConfiguration,
-        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
+        onTranscript: @escaping @Sendable (String, String, Bool, String?) -> Void,
         onStatus: @escaping @Sendable (String) -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
@@ -352,7 +352,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
     }
 
     private func receiveLoop(
-        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
+        onTranscript: @escaping @Sendable (String, String, Bool, String?) -> Void,
         onStatus: @escaping @Sendable (String) -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
@@ -374,7 +374,7 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
 
     private func handle(
         _ message: URLSessionWebSocketTask.Message,
-        onTranscript: @escaping @Sendable (String, String, Bool) -> Void,
+        onTranscript: @escaping @Sendable (String, String, Bool, String?) -> Void,
         onStatus: @escaping @Sendable (String) -> Void,
         onUnavailable: @escaping @Sendable (String) -> Void
     ) {
@@ -409,7 +409,12 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
                   (sentence["heartbeat"] as? Bool) != true,
                   let text = sentence["text"] as? String else { return }
             let isFinal = sentence["sentence_end"] as? Bool ?? false
-            onTranscript(text, languageID(from: sentence, output: output, payload: payload, text: text), isFinal)
+            onTranscript(
+                text,
+                languageID(from: sentence, output: output, payload: payload, text: text),
+                isFinal,
+                speakerID(from: sentence, output: output, payload: payload)
+            )
         case "task-failed":
             let message = header["error_message"] as? String ?? "Unknown Paraformer task failure."
             isStoppingIntentionally = true
@@ -460,6 +465,45 @@ private final class AliyunParaformerTranscriber: @unchecked Sendable {
                 if let nested = value as? [String: Any],
                    let language = firstLanguageValue(in: [nested]) {
                     return language
+                }
+            }
+        }
+        return nil
+    }
+
+    private func speakerID(from sentence: [String: Any], output: [String: Any], payload: [String: Any]) -> String? {
+        firstStringValue(
+            in: [sentence, output, payload],
+            keys: [
+                "speaker_id",
+                "speakerId",
+                "speaker",
+                "speaker_label",
+                "speakerLabel",
+                "channel_id",
+                "channelId"
+            ]
+        )
+    }
+
+    private func firstStringValue(in objects: [[String: Any]], keys: [String]) -> String? {
+        for object in objects {
+            for key in keys {
+                if let value = object[key] as? String,
+                   value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                    return value
+                }
+                if let value = object[key] as? NSNumber {
+                    return value.stringValue
+                }
+                if let value = object[key] as? Int {
+                    return String(value)
+                }
+            }
+            for value in object.values {
+                if let nested = value as? [String: Any],
+                   let match = firstStringValue(in: [nested], keys: keys) {
+                    return match
                 }
             }
         }
@@ -1589,8 +1633,46 @@ struct LiveTranscriptDraft: Identifiable, Hashable {
     var text: String
 }
 
+private struct RecentFinalizedTranscript {
+    var key: String
+    var segmentID: TranscriptSegment.ID
+    var languageID: String
+    var speakerID: String?
+    var text: String
+    var committedAt: Date
+}
+
+private struct LiveTranscriptUtterance {
+    var languageID: String
+    var speakerID: String?
+    var text: String
+    var startedAt: Date
+    var lastUpdatedAt: Date
+
+    var streamKey: String {
+        "\(languageID)|\(normalizedSpeakerIDForTranscript(speakerID))"
+    }
+}
+
+fileprivate func normalizedSpeakerIDForTranscript(_ speakerID: String?) -> String {
+    guard let normalized = speakerID?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased(),
+          normalized.isEmpty == false else {
+        return "default"
+    }
+    return normalized
+}
+
 @MainActor
 final class MeetingSessionViewModel: ObservableObject {
+    private enum TranscriptTiming {
+        static let currentFlushDelay: TimeInterval = 1.8
+        static let punctuationFlushDelay: TimeInterval = 0.75
+        static let deferredFlushDelay: TimeInterval = 1.4
+        static let committedRevisionWindow: TimeInterval = 6.0
+    }
+
     @Published var draftQuestion = ""
     @Published var activeSuggestion = "Start recording and I will surface likely questions, objections, and useful reply angles here."
     @Published private(set) var liveDraft: LiveTranscriptDraft?
@@ -1626,13 +1708,19 @@ final class MeetingSessionViewModel: ObservableObject {
     private var speechTranscriber: LiveSpeechTranscriber?
     private var paraformerTranscriber: AliyunParaformerTranscriber?
     private var lastEmittedTranscripts: [String: String] = [:]
-    private var pendingLiveTranscripts: [String: String] = [:]
-    private var pendingLiveTranscriptTimers: [String: Timer] = [:]
+    private var currentLiveUtterances: [String: LiveTranscriptUtterance] = [:]
+    private var currentLiveUtteranceTimers: [String: Timer] = [:]
+    private var deferredLiveUtterancesByLanguage: [String: [LiveTranscriptUtterance]] = [:]
+    private var deferredLiveUtteranceTimers: [String: Timer] = [:]
     private var lastFinalizedTranscripts: [String: String] = [:]
-    private var activeLiveLanguageID: String?
-    private var lastCommittedSegmentID: TranscriptSegment.ID?
-    private var lastCommittedTranscript = ""
-    private var lastCommittedAt: Date?
+    private var activeLiveUtteranceKey: String?
+    private var lastCommittedSegmentIDs: [String: TranscriptSegment.ID] = [:]
+    private var lastCommittedTranscripts: [String: String] = [:]
+    private var lastCommittedAts: [String: Date] = [:]
+    private var lastCommittedStartedAts: [String: Date] = [:]
+    private var recentFinalizedTranscripts: [RecentFinalizedTranscript] = []
+    private var translationRequestTexts: [TranscriptSegment.ID: String] = [:]
+    private var liveTranscriptionStartedAt: Date?
     private var modelConfiguration = ModelConfiguration()
 
     func startLiveTranscription(
@@ -1647,6 +1735,7 @@ final class MeetingSessionViewModel: ObservableObject {
         modelConfiguration = configuration
         demoIndex = 0
         activeMeetingID = meetingID
+        liveTranscriptionStartedAt = Date()
         appendSegment = append
         self.updateSegment = updateSegment
         updateSegmentTranslation = updateTranslation
@@ -1656,6 +1745,9 @@ final class MeetingSessionViewModel: ObservableObject {
 
     func resumeLiveTranscription() {
         guard activeMeetingID != nil else { return }
+        flushAllPendingTranscripts()
+        lastEmittedTranscripts = [:]
+        liveTranscriptionStartedAt = liveTranscriptionStartedAt ?? Date()
         startSpeechRecognition()
     }
 
@@ -1718,9 +1810,14 @@ final class MeetingSessionViewModel: ObservableObject {
         paraformerTranscriber = transcriber
         transcriber.start(
             configuration: modelConfiguration,
-            onTranscript: { [weak self] transcript, languageID, isFinal in
+            onTranscript: { [weak self] transcript, languageID, isFinal, speakerID in
                 Task { @MainActor in
-                    self?.emitTranscriptIfNeeded(transcript, languageID: languageID, isFinal: isFinal)
+                    self?.emitTranscriptIfNeeded(
+                        transcript,
+                        languageID: languageID,
+                        isFinal: isFinal,
+                        speakerID: speakerID
+                    )
                 }
             },
             onStatus: { [weak self] status in
@@ -1749,9 +1846,9 @@ final class MeetingSessionViewModel: ObservableObject {
         let languageIDs = liveRecognitionLanguageIDs(localLanguage: modelConfiguration.localLanguage)
         transcriber.start(
             languageIDs: languageIDs,
-            onTranscript: { [weak self] transcript, languageID in
+            onTranscript: { [weak self] transcript, languageID, isFinal in
                 Task { @MainActor in
-                    self?.emitTranscriptIfNeeded(transcript, languageID: languageID, isFinal: false)
+                    self?.emitTranscriptIfNeeded(transcript, languageID: languageID, isFinal: isFinal)
                 }
             },
             onSilence: { [weak self] in
@@ -1767,74 +1864,228 @@ final class MeetingSessionViewModel: ObservableObject {
         )
     }
 
-    private func emitTranscriptIfNeeded(_ transcript: String, languageID: String, isFinal: Bool) {
+    private func emitTranscriptIfNeeded(
+        _ transcript: String,
+        languageID: String,
+        isFinal: Bool,
+        speakerID: String? = nil
+    ) {
         let cleanTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lastEmittedTranscript = lastEmittedTranscripts[languageID] ?? ""
+        let streamKey = transcriptStreamKey(languageID: languageID, speakerID: speakerID)
+        let lastEmittedTranscript = lastEmittedTranscripts[streamKey] ?? ""
         guard cleanTranscript != lastEmittedTranscript,
-              cleanTranscript != lastFinalizedTranscripts[languageID],
               appendSegment != nil else { return }
-        guard cleanTranscript.count >= 2 else { return }
-        lastEmittedTranscripts[languageID] = cleanTranscript
+        guard shouldAcceptLiveTranscript(cleanTranscript) else { return }
+        lastEmittedTranscripts[streamKey] = cleanTranscript
 
-        updatePendingTranscript(cleanTranscript, languageID: languageID)
-        if isFinal || shouldFlushTranscript(text: cleanTranscript, languageID: languageID) {
-            flushPendingTranscript(languageID: languageID)
+        let now = Date()
+        if reviseRecentlyCommittedTranscriptIfNeeded(
+            cleanTranscript,
+            languageID: languageID,
+            speakerID: speakerID,
+            streamKey: streamKey,
+            at: now
+        ) {
+            return
+        }
+
+        handleIncomingUtterance(
+            LiveTranscriptUtterance(
+                languageID: languageID,
+                speakerID: speakerID,
+                text: cleanTranscript,
+                startedAt: now,
+                lastUpdatedAt: now
+            ),
+            isFinal: isFinal
+        )
+    }
+
+    private func handleIncomingUtterance(_ incoming: LiveTranscriptUtterance, isFinal: Bool) {
+        if updateDeferredUtteranceIfNeeded(with: incoming, isFinal: isFinal) {
+            return
+        }
+
+        let streamKey = incoming.streamKey
+        if var current = currentLiveUtterances[streamKey] {
+            if isContinuationOrRevision(incoming.text, of: current.text) {
+                current.text = bestPendingTranscript(current: current.text, incoming: incoming.text)
+                current.lastUpdatedAt = incoming.lastUpdatedAt
+                currentLiveUtterances[streamKey] = current
+                showLiveDraft(current, streamKey: streamKey)
+                if isFinal {
+                    flushCurrentUtterance(streamKey: streamKey)
+                } else {
+                    scheduleCurrentUtteranceFlush(streamKey: streamKey, text: incoming.text)
+                }
+                return
+            }
+            deferCurrentUtterance(streamKey: streamKey)
+        }
+
+        if let activeLiveUtteranceKey,
+           activeLiveUtteranceKey != streamKey,
+           currentLiveUtterances[activeLiveUtteranceKey] != nil {
+            deferCurrentUtterance(streamKey: activeLiveUtteranceKey)
+        }
+
+        currentLiveUtterances[streamKey] = incoming
+        showLiveDraft(incoming, streamKey: streamKey)
+        if isFinal {
+            flushCurrentUtterance(streamKey: streamKey)
         } else {
-            schedulePendingTranscriptFlush(languageID: languageID)
+            scheduleCurrentUtteranceFlush(streamKey: streamKey, text: incoming.text)
         }
     }
 
-    private func updatePendingTranscript(_ transcript: String, languageID: String) {
-        if activeLiveLanguageID != languageID {
-            clearPendingTranscripts(except: languageID)
-            activeLiveLanguageID = languageID
+    private func updateDeferredUtteranceIfNeeded(with incoming: LiveTranscriptUtterance, isFinal: Bool) -> Bool {
+        guard var deferredUtterances = deferredLiveUtterancesByLanguage[incoming.languageID],
+              let index = deferredUtterances.firstIndex(where: { isContinuationOrRevision(incoming.text, of: $0.text) }) else {
+            return false
         }
-        pendingLiveTranscripts[languageID] = transcript
-        updateLiveDraft(languageID: languageID)
+
+        var deferred = deferredUtterances[index]
+        deferred.text = bestPendingTranscript(current: deferred.text, incoming: incoming.text)
+        deferred.speakerID = incoming.speakerID ?? deferred.speakerID
+        deferred.lastUpdatedAt = incoming.lastUpdatedAt
+        deferredUtterances[index] = deferred
+        deferredLiveUtterancesByLanguage[incoming.languageID] = deferredUtterances
+
+        if isFinal {
+            flushDeferredUtterances(languageID: incoming.languageID)
+        } else {
+            scheduleDeferredUtteranceFlush(languageID: incoming.languageID, text: incoming.text)
+        }
+        return true
     }
 
-    private func schedulePendingTranscriptFlush(languageID: String) {
-        pendingLiveTranscriptTimers[languageID]?.invalidate()
-        pendingLiveTranscriptTimers[languageID] = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+    private func scheduleCurrentUtteranceFlush(streamKey: String, text: String) {
+        currentLiveUtteranceTimers[streamKey]?.invalidate()
+        let delay = shouldFlushTranscript(text: text)
+            ? TranscriptTiming.punctuationFlushDelay
+            : TranscriptTiming.currentFlushDelay
+        currentLiveUtteranceTimers[streamKey] = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.flushPendingTranscript(languageID: languageID)
+                self?.flushCurrentUtterance(streamKey: streamKey)
             }
         }
     }
 
-    private func shouldFlushTranscript(text: String, languageID: String) -> Bool {
+    private func deferCurrentUtterance(streamKey: String) {
+        guard let utterance = currentLiveUtterances.removeValue(forKey: streamKey) else { return }
+        currentLiveUtteranceTimers[streamKey]?.invalidate()
+        currentLiveUtteranceTimers[streamKey] = nil
+        appendDeferredUtterance(utterance)
+        if activeLiveUtteranceKey == streamKey {
+            clearLiveDraft()
+            activeLiveUtteranceKey = nil
+        }
+    }
+
+    private func appendDeferredUtterance(_ utterance: LiveTranscriptUtterance) {
+        var utterances = deferredLiveUtterancesByLanguage[utterance.languageID] ?? []
+        if let index = utterances.firstIndex(where: { isContinuationOrRevision(utterance.text, of: $0.text) }) {
+            var existing = utterances[index]
+            existing.text = bestPendingTranscript(current: existing.text, incoming: utterance.text)
+            existing.lastUpdatedAt = max(existing.lastUpdatedAt, utterance.lastUpdatedAt)
+            existing.speakerID = utterance.speakerID ?? existing.speakerID
+            utterances[index] = existing
+        } else {
+            utterances.append(utterance)
+        }
+        deferredLiveUtterancesByLanguage[utterance.languageID] = utterances
+        scheduleDeferredUtteranceFlush(languageID: utterance.languageID, text: utterance.text)
+    }
+
+    private func scheduleDeferredUtteranceFlush(languageID: String, text: String) {
+        deferredLiveUtteranceTimers[languageID]?.invalidate()
+        let delay = shouldFlushTranscript(text: text)
+            ? TranscriptTiming.punctuationFlushDelay
+            : TranscriptTiming.deferredFlushDelay
+        deferredLiveUtteranceTimers[languageID] = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.flushDeferredUtterances(languageID: languageID)
+            }
+        }
+    }
+
+    private func flushCurrentUtterance(streamKey: String) {
+        currentLiveUtteranceTimers[streamKey]?.invalidate()
+        currentLiveUtteranceTimers[streamKey] = nil
+        guard let utterance = currentLiveUtterances.removeValue(forKey: streamKey) else { return }
+        if activeLiveUtteranceKey == streamKey {
+            clearLiveDraft()
+            activeLiveUtteranceKey = nil
+        }
+        commitFinalTranscript(utterance)
+    }
+
+    private func flushDeferredUtterances(languageID: String) {
+        deferredLiveUtteranceTimers[languageID]?.invalidate()
+        deferredLiveUtteranceTimers[languageID] = nil
+        let utterances = deferredLiveUtterancesByLanguage.removeValue(forKey: languageID) ?? []
+        utterances.forEach(commitFinalTranscript)
+    }
+
+    private func shouldFlushTranscript(text: String) -> Bool {
         guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
         return "。！？?!.;；".contains(last)
     }
 
-    private func flushPendingTranscript(languageID: String) {
-        pendingLiveTranscriptTimers[languageID]?.invalidate()
-        pendingLiveTranscriptTimers[languageID] = nil
+    private func shouldAcceptLiveTranscript(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return false }
+        if trimmed.count >= 2 { return true }
+        guard let scalar = trimmed.unicodeScalars.first else { return false }
+        return (0x4E00...0x9FFF).contains(Int(scalar.value))
+    }
 
-        let delta = (pendingLiveTranscripts[languageID] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        pendingLiveTranscripts[languageID] = nil
-        clearLiveDraft(languageID: languageID)
-        if activeLiveLanguageID == languageID {
-            activeLiveLanguageID = nil
-        }
+    private func commitFinalTranscript(_ utterance: LiveTranscriptUtterance) {
+        commitFinalTranscript(
+            utterance.text,
+            languageID: utterance.languageID,
+            speakerID: utterance.speakerID,
+            startedAt: utterance.startedAt
+        )
+    }
+
+    private func commitFinalTranscript(_ text: String, languageID: String, speakerID: String?, startedAt: Date) {
+        let streamKey = transcriptStreamKey(languageID: languageID, speakerID: speakerID)
+        let delta = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard delta.isEmpty == false,
-              delta != lastFinalizedTranscripts[languageID],
+              delta != lastFinalizedTranscripts[streamKey],
               let activeMeetingID,
               let appendSegment else { return }
-        lastFinalizedTranscripts[languageID] = delta
+        if reviseRecentlyCommittedTranscriptIfNeeded(
+            delta,
+            languageID: languageID,
+            speakerID: speakerID,
+            streamKey: streamKey,
+            at: Date()
+        ) {
+            return
+        }
+        lastFinalizedTranscripts[streamKey] = delta
 
-        let timestamp = TimeInterval(demoIndex * 8)
-        demoIndex += 1
+        let timestamp = max(0, startedAt.timeIntervalSince(liveTranscriptionStartedAt ?? startedAt))
         let localLanguage = modelConfiguration.localLanguage
         let shouldTranslate = shouldTranslateFinalTranscript(languageID: languageID, localLanguage: localLanguage)
 
-        if shouldReviseLastCommittedTranscript(with: delta),
-           let lastCommittedSegmentID,
+        if shouldReviseLastCommittedTranscript(with: delta, streamKey: streamKey),
+           let lastCommittedSegmentID = lastCommittedSegmentIDs[streamKey],
            let updateSegment {
-            let speaker = "Speaker · \(languageLabel(for: languageID))"
+            let speaker = speakerLabel(languageID: languageID, speakerID: speakerID)
             updateSegment(lastCommittedSegmentID, delta, delta, speaker)
-            lastCommittedTranscript = delta
-            lastCommittedAt = Date()
+            lastCommittedTranscripts[streamKey] = delta
+            lastCommittedAts[streamKey] = Date()
+            lastCommittedStartedAts[streamKey] = startedAt
+            rememberRecentFinalizedTranscript(
+                delta,
+                streamKey: streamKey,
+                segmentID: lastCommittedSegmentID,
+                languageID: languageID,
+                speakerID: speakerID
+            )
             translateCommittedSegmentIfNeeded(
                 segmentID: lastCommittedSegmentID,
                 text: delta,
@@ -1848,16 +2099,24 @@ final class MeetingSessionViewModel: ObservableObject {
         let segment = TranscriptSegment(
             meetingID: activeMeetingID,
             timestamp: timestamp,
-            speaker: "Speaker · \(languageLabel(for: languageID))",
+            speaker: speakerLabel(languageID: languageID, speakerID: speakerID),
             sourceText: delta,
             translatedText: delta,
             kind: .transcript,
             confidence: 0.82
         )
         appendSegment(segment)
-        lastCommittedSegmentID = segment.id
-        lastCommittedTranscript = delta
-        lastCommittedAt = Date()
+        lastCommittedSegmentIDs[streamKey] = segment.id
+        lastCommittedTranscripts[streamKey] = delta
+        lastCommittedAts[streamKey] = Date()
+        lastCommittedStartedAts[streamKey] = startedAt
+        rememberRecentFinalizedTranscript(
+            delta,
+            streamKey: streamKey,
+            segmentID: segment.id,
+            languageID: languageID,
+            speakerID: speakerID
+        )
 
         translateCommittedSegmentIfNeeded(
             segmentID: segment.id,
@@ -1876,6 +2135,7 @@ final class MeetingSessionViewModel: ObservableObject {
         localLanguage: String
     ) {
         guard shouldTranslate, let updateSegmentTranslation else { return }
+        translationRequestTexts[segmentID] = text
         Task {
             do {
                 guard let translated = try await MeetingAIClient().translateText(
@@ -1883,10 +2143,11 @@ final class MeetingSessionViewModel: ObservableObject {
                     targetLanguage: LocalMeetingLanguage(rawValue: localLanguage)?.translationTarget ?? "Chinese (Mandarin, Simplified Chinese)",
                     configuration: modelConfiguration
                 ),
-                      translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
-                      translated != text else { return }
+	                      translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+	                      translated != text else { return }
 
                 await MainActor.run {
+                    guard self.translationRequestTexts[segmentID] == text else { return }
                     updateSegmentTranslation(segmentID, translated)
                 }
             } catch {
@@ -1929,9 +2190,152 @@ final class MeetingSessionViewModel: ObservableObject {
         return normalized
     }
 
-    private func shouldReviseLastCommittedTranscript(with transcript: String) -> Bool {
-        guard let lastCommittedAt,
+    private func transcriptStreamKey(languageID: String, speakerID: String?) -> String {
+        "\(languageID)|\(normalizedSpeakerIDForTranscript(speakerID))"
+    }
+
+    private func speakerLabel(languageID: String, speakerID: String?) -> String {
+        let language = languageLabel(for: languageID)
+        let normalizedSpeakerID = normalizedSpeakerIDForTranscript(speakerID)
+        guard normalizedSpeakerID != "default" else {
+            return "Speaker · \(language)"
+        }
+        return "Speaker \(normalizedSpeakerID) · \(language)"
+    }
+
+    private func reviseRecentlyCommittedTranscriptIfNeeded(
+        _ transcript: String,
+        languageID: String,
+        speakerID: String?,
+        streamKey: String,
+        at now: Date
+    ) -> Bool {
+        if let sameStreamRevision = recentCommittedRevisionCandidate(
+            transcript,
+            languageID: languageID,
+            streamKey: streamKey,
+            at: now,
+            preferSameStream: true
+        ) {
+            return applyCommittedRevision(
+                transcript,
+                candidate: sameStreamRevision,
+                fallbackLanguageID: languageID,
+                fallbackSpeakerID: speakerID,
+                at: now
+            )
+        }
+
+        guard let crossStreamRevision = recentCommittedRevisionCandidate(
+            transcript,
+            languageID: languageID,
+            streamKey: streamKey,
+            at: now,
+            preferSameStream: false
+        ) else { return false }
+
+        return applyCommittedRevision(
+            transcript,
+            candidate: crossStreamRevision,
+            fallbackLanguageID: languageID,
+            fallbackSpeakerID: speakerID,
+            at: now
+        )
+    }
+
+    private func recentCommittedRevisionCandidate(
+        _ transcript: String,
+        languageID: String,
+        streamKey: String,
+        at now: Date,
+        preferSameStream: Bool
+    ) -> RecentFinalizedTranscript? {
+        pruneRecentFinalizedTranscripts()
+        return recentFinalizedTranscripts.reversed().first { recent in
+            guard now.timeIntervalSince(recent.committedAt) < TranscriptTiming.committedRevisionWindow,
+                  preferSameStream ? recent.key == streamKey : recent.key != streamKey,
+                  shouldAllowCrossStreamRevision(from: languageID, to: recent.languageID),
+                  isContinuationOrRevision(transcript, of: recent.text) else {
+                return false
+            }
+            let revised = bestPendingTranscript(current: recent.text, incoming: transcript)
+            return revised != recent.text
+        }
+    }
+
+    private func shouldAllowCrossStreamRevision(from incomingLanguageID: String, to committedLanguageID: String) -> Bool {
+        let incomingFamily = languageFamily(for: incomingLanguageID)
+        let committedFamily = languageFamily(for: committedLanguageID)
+        return incomingFamily == committedFamily || incomingFamily == "auto" || committedFamily == "auto"
+    }
+
+    private func applyCommittedRevision(
+        _ transcript: String,
+        candidate: RecentFinalizedTranscript,
+        fallbackLanguageID: String,
+        fallbackSpeakerID: String?,
+        at now: Date
+    ) -> Bool {
+        guard let updateSegment else { return false }
+        let revised = bestPendingTranscript(current: candidate.text, incoming: transcript)
+        guard revised != candidate.text else { return true }
+        let languageID = candidate.languageID
+        let speakerID = candidate.speakerID ?? fallbackSpeakerID
+        let speaker = speakerLabel(languageID: languageID, speakerID: speakerID)
+        updateSegment(candidate.segmentID, revised, revised, speaker)
+        lastCommittedTranscripts[candidate.key] = revised
+        lastCommittedAts[candidate.key] = now
+        lastFinalizedTranscripts[candidate.key] = revised
+        rememberRecentFinalizedTranscript(
+            revised,
+            streamKey: candidate.key,
+            segmentID: candidate.segmentID,
+            languageID: languageID,
+            speakerID: speakerID
+        )
+        translateCommittedSegmentIfNeeded(
+            segmentID: candidate.segmentID,
+            text: revised,
+            languageID: languageID,
+            shouldTranslate: shouldTranslateFinalTranscript(languageID: languageID, localLanguage: modelConfiguration.localLanguage),
+            localLanguage: modelConfiguration.localLanguage
+        )
+        return true
+    }
+
+    private func rememberRecentFinalizedTranscript(
+        _ transcript: String,
+        streamKey: String,
+        segmentID: TranscriptSegment.ID,
+        languageID: String,
+        speakerID: String?
+    ) {
+        pruneRecentFinalizedTranscripts()
+        recentFinalizedTranscripts.removeAll { $0.segmentID == segmentID }
+        recentFinalizedTranscripts.append(
+            RecentFinalizedTranscript(
+                key: streamKey,
+                segmentID: segmentID,
+                languageID: languageID,
+                speakerID: speakerID,
+                text: transcript,
+                committedAt: Date()
+            )
+        )
+        if recentFinalizedTranscripts.count > 12 {
+            recentFinalizedTranscripts.removeFirst(recentFinalizedTranscripts.count - 12)
+        }
+    }
+
+    private func pruneRecentFinalizedTranscripts() {
+        let cutoff = Date().addingTimeInterval(-10)
+        recentFinalizedTranscripts.removeAll { $0.committedAt < cutoff }
+    }
+
+    private func shouldReviseLastCommittedTranscript(with transcript: String, streamKey: String) -> Bool {
+        guard let lastCommittedAt = lastCommittedAts[streamKey],
               Date().timeIntervalSince(lastCommittedAt) < 12,
+              let lastCommittedTranscript = lastCommittedTranscripts[streamKey],
               lastCommittedTranscript.isEmpty == false else { return false }
         let normalizedNew = normalizedTranscriptForOverlap(transcript)
         let normalizedLast = normalizedTranscriptForOverlap(lastCommittedTranscript)
@@ -1941,6 +2345,42 @@ final class MeetingSessionViewModel: ObservableObject {
             || overlapRatio(normalizedNew, normalizedLast) >= 0.62
             || longestCommonSubsequenceRatio(normalizedNew, normalizedLast) >= 0.72
             || tokenOverlapRatio(transcript, lastCommittedTranscript) >= 0.58
+    }
+
+    private func shouldStartNewPendingTranscript(_ transcript: String, after pendingTranscript: String) -> Bool {
+        isContinuationOrRevision(transcript, of: pendingTranscript) == false
+    }
+
+    private func isContinuationOrRevision(_ transcript: String, of pendingTranscript: String) -> Bool {
+        let normalizedNew = normalizedTranscriptForOverlap(transcript)
+        let normalizedPending = normalizedTranscriptForOverlap(pendingTranscript)
+        guard normalizedNew.count >= 4, normalizedPending.count >= 4 else { return false }
+        guard normalizedNew != normalizedPending else { return true }
+        if normalizedNew.contains(normalizedPending) || normalizedPending.contains(normalizedNew) {
+            return true
+        }
+        if overlapRatio(normalizedNew, normalizedPending) >= 0.45 {
+            return true
+        }
+        if longestCommonSubsequenceRatio(normalizedNew, normalizedPending) >= 0.58 {
+            return true
+        }
+        if tokenOverlapRatio(transcript, pendingTranscript) >= 0.4 {
+            return true
+        }
+        return false
+    }
+
+    private func bestPendingTranscript(current: String, incoming: String) -> String {
+        let normalizedCurrent = normalizedTranscriptForOverlap(current)
+        let normalizedIncoming = normalizedTranscriptForOverlap(incoming)
+        if normalizedIncoming.contains(normalizedCurrent) {
+            return incoming
+        }
+        if normalizedCurrent.contains(normalizedIncoming) {
+            return current
+        }
+        return normalizedIncoming.count > normalizedCurrent.count ? incoming : current
     }
 
     private func normalizedTranscriptForOverlap(_ text: String) -> String {
@@ -2008,20 +2448,24 @@ final class MeetingSessionViewModel: ObservableObject {
     }
 
     private func flushAllPendingTranscripts() {
-        for languageID in Array(pendingLiveTranscripts.keys) {
-            flushPendingTranscript(languageID: languageID)
+        for languageID in Array(deferredLiveUtterancesByLanguage.keys) {
+            flushDeferredUtterances(languageID: languageID)
+        }
+        for streamKey in Array(currentLiveUtterances.keys) {
+            flushCurrentUtterance(streamKey: streamKey)
         }
     }
 
-    private func updateLiveDraft(languageID: String) {
-        let text = (pendingLiveTranscripts[languageID] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    private func showLiveDraft(_ utterance: LiveTranscriptUtterance, streamKey: String) {
+        let text = utterance.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.isEmpty == false, let activeMeetingID else {
-            clearLiveDraft(languageID: languageID)
+            clearLiveDraft()
             return
         }
+        activeLiveUtteranceKey = streamKey
         liveDraft = LiveTranscriptDraft(
             meetingID: activeMeetingID,
-            languageID: languageID,
+            languageID: utterance.languageID,
             text: text
         )
     }
@@ -2036,22 +2480,8 @@ final class MeetingSessionViewModel: ObservableObject {
         }
     }
 
-    private func clearPendingTranscripts(except languageID: String) {
-        for key in Array(pendingLiveTranscripts.keys) where key != languageID {
-            pendingLiveTranscripts[key] = nil
-            pendingLiveTranscriptTimers[key]?.invalidate()
-            pendingLiveTranscriptTimers[key] = nil
-        }
-        if liveDraft?.languageID != languageID {
-            liveDraft = nil
-        }
-    }
-
     private func liveRecognitionLanguageIDs(localLanguage: String) -> [String] {
-        let alternatives = LocalMeetingLanguage.allCases
-            .map(\.rawValue)
-            .filter { $0 != localLanguage }
-        return [localLanguage] + alternatives
+        [localLanguage]
     }
 
     private func appendMeetingLog(_ message: String, level: String = "info") {
@@ -2061,20 +2491,27 @@ final class MeetingSessionViewModel: ObservableObject {
 
     private func stopSpeechRecognition(keepSession: Bool) {
         flushAllPendingTranscripts()
-        pendingLiveTranscriptTimers.values.forEach { $0.invalidate() }
-        pendingLiveTranscriptTimers = [:]
+        currentLiveUtteranceTimers.values.forEach { $0.invalidate() }
+        currentLiveUtteranceTimers = [:]
+        deferredLiveUtteranceTimers.values.forEach { $0.invalidate() }
+        deferredLiveUtteranceTimers = [:]
         speechTranscriber?.stop()
         speechTranscriber = nil
         paraformerTranscriber?.stop()
         paraformerTranscriber = nil
         if keepSession == false {
             lastEmittedTranscripts = [:]
-            pendingLiveTranscripts = [:]
+            currentLiveUtterances = [:]
+            deferredLiveUtterancesByLanguage = [:]
             lastFinalizedTranscripts = [:]
-            activeLiveLanguageID = nil
-            lastCommittedSegmentID = nil
-            lastCommittedTranscript = ""
-            lastCommittedAt = nil
+            activeLiveUtteranceKey = nil
+            lastCommittedSegmentIDs = [:]
+            lastCommittedTranscripts = [:]
+            lastCommittedAts = [:]
+            lastCommittedStartedAts = [:]
+            recentFinalizedTranscripts = []
+            translationRequestTexts = [:]
+            liveTranscriptionStartedAt = nil
             clearLiveDraft()
         }
     }

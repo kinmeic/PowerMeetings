@@ -1667,10 +1667,10 @@ fileprivate func normalizedSpeakerIDForTranscript(_ speakerID: String?) -> Strin
 @MainActor
 final class MeetingSessionViewModel: ObservableObject {
     private enum TranscriptTiming {
-        static let currentFlushDelay: TimeInterval = 1.8
-        static let punctuationFlushDelay: TimeInterval = 0.75
-        static let deferredFlushDelay: TimeInterval = 1.4
-        static let committedRevisionWindow: TimeInterval = 6.0
+        static let currentFlushDelay: TimeInterval = 2.6
+        static let punctuationFlushDelay: TimeInterval = 1.4
+        static let deferredFlushDelay: TimeInterval = 2.2
+        static let committedRevisionWindow: TimeInterval = 12.0
     }
 
     @Published var draftQuestion = ""
@@ -2051,7 +2051,11 @@ final class MeetingSessionViewModel: ObservableObject {
 
     private func commitFinalTranscript(_ text: String, languageID: String, speakerID: String?, startedAt: Date) {
         let streamKey = transcriptStreamKey(languageID: languageID, speakerID: speakerID)
-        let delta = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawDelta = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let delta = transcriptByRemovingCommittedBoundaryOverlap(
+            rawDelta,
+            languageID: languageID
+        )
         guard delta.isEmpty == false,
               delta != lastFinalizedTranscripts[streamKey],
               let activeMeetingID,
@@ -2258,7 +2262,7 @@ final class MeetingSessionViewModel: ObservableObject {
                   isContinuationOrRevision(transcript, of: recent.text) else {
                 return false
             }
-            let revised = bestPendingTranscript(current: recent.text, incoming: transcript)
+            let revised = revisedCommittedTranscript(current: recent.text, incoming: transcript)
             return revised != recent.text
         }
     }
@@ -2277,7 +2281,7 @@ final class MeetingSessionViewModel: ObservableObject {
         at now: Date
     ) -> Bool {
         guard let updateSegment else { return false }
-        let revised = bestPendingTranscript(current: candidate.text, incoming: transcript)
+        let revised = revisedCommittedTranscript(current: candidate.text, incoming: transcript)
         guard revised != candidate.text else { return true }
         let languageID = candidate.languageID
         let speakerID = candidate.speakerID ?? fallbackSpeakerID
@@ -2301,6 +2305,10 @@ final class MeetingSessionViewModel: ObservableObject {
             localLanguage: modelConfiguration.localLanguage
         )
         return true
+    }
+
+    private func revisedCommittedTranscript(current: String, incoming: String) -> String {
+        return bestPendingTranscript(current: current, incoming: incoming)
     }
 
     private func rememberRecentFinalizedTranscript(
@@ -2330,6 +2338,70 @@ final class MeetingSessionViewModel: ObservableObject {
     private func pruneRecentFinalizedTranscripts() {
         let cutoff = Date().addingTimeInterval(-10)
         recentFinalizedTranscripts.removeAll { $0.committedAt < cutoff }
+    }
+
+    private func transcriptByRemovingCommittedBoundaryOverlap(
+        _ transcript: String,
+        languageID: String
+    ) -> String {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return "" }
+        pruneRecentFinalizedTranscripts()
+
+        var bestTrimmed = trimmed
+        var bestOverlapScore = 0
+        for recent in recentFinalizedTranscripts.reversed() {
+            guard shouldAllowCrossStreamRevision(from: languageID, to: recent.languageID) else { continue }
+            let overlap = boundaryOverlapPrefixLength(previous: recent.text, current: trimmed)
+            guard overlap.normalizedLength > bestOverlapScore else { continue }
+            let candidate = trimmedAfterRemovingPrefix(length: overlap.originalPrefixLength, from: trimmed)
+            if candidate.isEmpty || shouldAcceptLiveTranscript(candidate) {
+                bestTrimmed = candidate
+                bestOverlapScore = overlap.normalizedLength
+            }
+        }
+
+        return bestTrimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func boundaryOverlapPrefixLength(previous: String, current: String) -> (originalPrefixLength: Int, normalizedLength: Int) {
+        let previousCharacters = Array(previous.trimmingCharacters(in: .whitespacesAndNewlines))
+        let currentCharacters = Array(current.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard previousCharacters.isEmpty == false, currentCharacters.isEmpty == false else {
+            return (0, 0)
+        }
+
+        let maxPreviousLength = min(previousCharacters.count, 72)
+        let maxCurrentLength = min(currentCharacters.count, 72)
+        var bestOriginalPrefixLength = 0
+        var bestNormalizedLength = 0
+
+        for previousLength in 1...maxPreviousLength {
+            let previousSuffix = String(previousCharacters.suffix(previousLength))
+            let normalizedPreviousSuffix = normalizedTranscriptForOverlap(previousSuffix)
+            guard normalizedPreviousSuffix.count >= 4 else { continue }
+
+            for currentLength in 1...maxCurrentLength {
+                let currentPrefix = String(currentCharacters.prefix(currentLength))
+                let normalizedCurrentPrefix = normalizedTranscriptForOverlap(currentPrefix)
+                guard normalizedCurrentPrefix.count >= 4 else { continue }
+                if normalizedCurrentPrefix == normalizedPreviousSuffix,
+                   normalizedCurrentPrefix.count > bestNormalizedLength {
+                    bestOriginalPrefixLength = currentLength
+                    bestNormalizedLength = normalizedCurrentPrefix.count
+                }
+            }
+        }
+
+        guard bestNormalizedLength >= 4 else { return (0, 0) }
+        return (bestOriginalPrefixLength, bestNormalizedLength)
+    }
+
+    private func trimmedAfterRemovingPrefix(length: Int, from transcript: String) -> String {
+        guard length > 0 else { return transcript }
+        let characters = Array(transcript)
+        guard length < characters.count else { return "" }
+        return String(characters.dropFirst(length))
     }
 
     private func shouldReviseLastCommittedTranscript(with transcript: String, streamKey: String) -> Bool {

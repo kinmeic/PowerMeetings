@@ -32,16 +32,21 @@ jobs:
       - name: Show Swift version
         run: swift --version
 
-      - name: Build app bundle
-        run: CONFIGURATION=release Scripts/build_app.sh
+      - name: Build app bundles
+        run: |
+          set -euo pipefail
+          for ARCH in arm64 x86_64; do
+            ARCH="$ARCH" CONFIGURATION=release Scripts/build_app.sh
+          done
 
-      - name: Package app bundle
+      - name: Package app bundles
         run: |
           set -euo pipefail
           TAG="${{ inputs.tag }}"
-          ARCHIVE="PowerMeetings-${TAG}.zip"
-          ditto -c -k --sequesterRsrc --keepParent dist/PowerMeetings.app "$ARCHIVE"
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          for ARCH in arm64 x86_64; do
+            ARCHIVE="PowerMeetings-${TAG}-${ARCH}.zip"
+            ditto -c -k --sequesterRsrc --keepParent "dist/${ARCH}/PowerMeetings.app" "$ARCHIVE"
+          done
 
       - name: Publish GitHub release
         env:
@@ -55,15 +60,15 @@ jobs:
           fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ARCHIVE" --clobber
+            gh release upload "$TAG" PowerMeetings-"$TAG"-arm64.zip PowerMeetings-"$TAG"-x86_64.zip --clobber
           elif [[ "${{ inputs.prerelease }}" == "true" ]]; then
-            gh release create "$TAG" "$ARCHIVE" \
+            gh release create "$TAG" PowerMeetings-"$TAG"-arm64.zip PowerMeetings-"$TAG"-x86_64.zip \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_NAME" \
               --notes "Automated macOS build for $TAG." \
               --prerelease
           else
-            gh release create "$TAG" "$ARCHIVE" \
+            gh release create "$TAG" PowerMeetings-"$TAG"-arm64.zip PowerMeetings-"$TAG"-x86_64.zip \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_NAME" \
               --notes "Automated macOS build for $TAG."

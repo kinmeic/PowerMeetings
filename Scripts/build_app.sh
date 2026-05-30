@@ -4,9 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="PowerMeetings"
 CONFIGURATION="${CONFIGURATION:-debug}"
-ARCH="$(uname -m)"
+ARCH="${ARCH:-$(uname -m)}"
 BUILD_DIR="$ROOT_DIR/.build/$ARCH-apple-macosx/$CONFIGURATION"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="$ROOT_DIR/dist/$ARCH"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -17,9 +17,9 @@ ICON_FILE="$RESOURCES_DIR/PowerMeetings.icns"
 
 cd "$ROOT_DIR"
 if [[ "$CONFIGURATION" == "release" ]]; then
-    swift build --configuration release
+    swift build --configuration release --arch "$ARCH"
 else
-    swift build
+    swift build --arch "$ARCH"
 fi
 
 rm -rf "$APP_DIR"
